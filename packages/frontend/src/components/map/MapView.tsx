@@ -733,6 +733,29 @@ function buildBuildings3DView(args: {
   };
 }
 
+function buildApproximateBuildingShell(building: DetectedBuilding | null): {
+  roofCoordinates: google.maps.LatLngAltitudeLiteral[];
+  estimatedHeightM: number;
+  confidencePercent: number;
+} | null {
+  if (!building) return null;
+
+  const normalizedFootprint = normalizeFootprint(building.footprint);
+  if (normalizedFootprint.length < 3) return null;
+
+  const estimatedHeightM = clamp(building.estimatedHeightM ?? 24, 12, 120);
+
+  return {
+    roofCoordinates: normalizedFootprint.map((point) => ({
+      lat: point.lat,
+      lng: point.lng,
+      altitude: estimatedHeightM,
+    })),
+    estimatedHeightM,
+    confidencePercent: Math.round(clamp(building.confidence, 0, 1) * 100),
+  };
+}
+
 function segmentMidpoint(segment: FacadeSegmentOption): LatLng {
   return {
     lat: (segment.start.lat + segment.end.lat) / 2,
@@ -758,6 +781,8 @@ function Buildings3DPanel({
   if (!open) return null;
 
   const markers: Buildings3DMarker[] = [];
+  const approximateBuildingShell =
+    buildApproximateBuildingShell(detectedBuilding);
 
   if (detectedBuilding) {
     markers.push({
@@ -845,6 +870,20 @@ function Buildings3DPanel({
           gestureHandling={GestureHandling.GREEDY}
           style={{ width: "100%", height: "100%" }}
         >
+          {approximateBuildingShell && (
+            <gmp-polygon-3d
+              altitudeMode={
+                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
+              }
+              outerCoordinates={approximateBuildingShell.roofCoordinates}
+              fillColor="rgba(20, 184, 166, 0.22)"
+              strokeColor="#2dd4bf"
+              strokeWidth={2}
+              extruded
+              drawsOccludedSegments
+              zIndex={20}
+            />
+          )}
           {markers.map((marker) => (
             <Marker3D
               key={marker.id}
@@ -883,6 +922,21 @@ function Buildings3DPanel({
             </p>
             <p className="text-cyan-200">
               Recommended: {facadeRecommendation.recommendedVariantLabel}
+            </p>
+          </div>
+        )}
+        {approximateBuildingShell && (
+          <div className="pointer-events-none absolute top-3 left-3 max-w-[250px] rounded-md border border-emerald-500/25 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
+            <p className="font-medium text-foreground">
+              Approximate 3D building
+            </p>
+            <p className="text-muted-foreground">
+              Extruded footprint at about{" "}
+              {Math.round(approximateBuildingShell.estimatedHeightM)}m.
+            </p>
+            <p className="text-muted-foreground">
+              Footprint confidence: {approximateBuildingShell.confidencePercent}
+              %
             </p>
           </div>
         )}
@@ -2286,6 +2340,22 @@ export function MapView() {
             }
             facadeRecommendation={
               activeTemplateType === "facade" ? facadeRecommendation : null
+            }
+            reconstructionInfo={
+              activeTemplateType === "facade" && detectedBuilding
+                ? {
+                    estimatedHeightLabel: `${Math.round(
+                      buildApproximateBuildingShell(detectedBuilding)
+                        ?.estimatedHeightM ?? 24,
+                    )}m`,
+                    confidenceLabel: `${Math.round(
+                      clamp(detectedBuilding.confidence, 0, 1) * 100,
+                    )}%`,
+                    note: detectedBuilding.estimatedHeightM
+                      ? "This is a simplified massing generated from the detected footprint and estimated height."
+                      : "This is a simplified massing generated from the detected footprint with heuristic height estimation.",
+                  }
+                : null
             }
             reconstructionPresets={
               activeTemplateType === "facade"
