@@ -340,20 +340,6 @@ function pointToSegmentDistanceMeters(
   return Math.hypot(pointXY.x - projectionX, pointXY.y - projectionY);
 }
 
-function chooseFacadeSegment(
-  footprint: LatLng[],
-  hintStart: LatLng,
-  hintEnd: LatLng,
-): { start: LatLng; end: LatLng; lengthM: number } | null {
-  const segments = rankFacadeSegments(footprint, hintStart, hintEnd);
-  if (segments.length === 0) return null;
-  return {
-    start: segments[0].start,
-    end: segments[0].end,
-    lengthM: segments[0].lengthM,
-  };
-}
-
 function rankFacadeSegments(
   footprint: LatLng[],
   hintStart: LatLng,
