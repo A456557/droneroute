@@ -88,6 +88,16 @@ type Buildings3DMarker = {
   scale?: number;
 };
 
+type ReconstructionPresetOption = {
+  id: string;
+  label: string;
+  detail: string;
+  description: string;
+  templateType: Exclude<TemplateMode, "facade" | "pencil" | null>;
+  orbitParams?: OrbitParams;
+  gridParams?: GridParams;
+};
+
 const MIN_PENCIL_PATH_LENGTH_M = 10;
 const ROADMAP_TYPE = "roadmap" as google.maps.MapTypeId;
 const HYBRID_TYPE = "hybrid" as google.maps.MapTypeId;
@@ -398,6 +408,91 @@ function rankFacadeSegments(
       ...segment,
       label: `Facade ${index + 1}`,
     }));
+}
+
+function buildReconstructionPresets(
+  building: DetectedBuilding,
+  selectedSegment: FacadeSegmentOption | null,
+): ReconstructionPresetOption[] {
+  const footprint = normalizeFootprint(building.footprint);
+  if (footprint.length < 3) return [];
+
+  const latitudes = footprint.map((point) => point.lat);
+  const longitudes = footprint.map((point) => point.lng);
+  const minLat = Math.min(...latitudes);
+  const maxLat = Math.max(...latitudes);
+  const minLng = Math.min(...longitudes);
+  const maxLng = Math.max(...longitudes);
+  const spanNorthSouthM = haversine(minLat, minLng, maxLat, minLng);
+  const spanEastWestM = haversine(minLat, minLng, minLat, maxLng);
+  const footprintSizeM = Math.max(spanNorthSouthM, spanEastWestM, 18);
+  const estimatedHeightM = clamp(building.estimatedHeightM ?? 24, 12, 120);
+
+  let longestEdgeLengthM = 0;
+  let longestEdgeBearingDeg = 0;
+
+  for (let index = 0; index < footprint.length; index++) {
+    const current = footprint[index];
+    const next = footprint[(index + 1) % footprint.length];
+    const lengthM = haversine(current.lat, current.lng, next.lat, next.lng);
+    if (lengthM > longestEdgeLengthM) {
+      longestEdgeLengthM = lengthM;
+      longestEdgeBearingDeg = bearingTo(
+        current.lat,
+        current.lng,
+        next.lat,
+        next.lng,
+      );
+    }
+  }
+
+  const rotationDeg =
+    selectedSegment != null
+      ? bearingTo(
+          selectedSegment.start.lat,
+          selectedSegment.start.lng,
+          selectedSegment.end.lat,
+          selectedSegment.end.lng,
+        )
+      : longestEdgeBearingDeg;
+
+  return [
+    {
+      id: "roof-grid",
+      label: "Roof grid",
+      detail: `${Math.round(estimatedHeightM + 28)}m • ${Math.round(clamp(footprintSizeM / 5, 8, 20))}m spacing`,
+      description:
+        "Top-down pass aligned to the footprint for roof and nadir coverage.",
+      templateType: "grid",
+      gridParams: {
+        ...DEFAULT_GRID_PARAMS,
+        corner1: [minLat, minLng],
+        corner2: [maxLat, maxLng],
+        altitude: Math.round(clamp(estimatedHeightM + 28, 35, 120)),
+        spacingM: Math.round(clamp(footprintSizeM / 5, 8, 20)),
+        addPhotos: true,
+        rotationDeg,
+        reverse: false,
+      },
+    },
+    {
+      id: "oblique-orbit",
+      label: "Oblique orbit",
+      detail: `${Math.round(clamp(footprintSizeM * 0.7, 18, 70))}m radius • ${Math.round(clamp(estimatedHeightM + 18, 25, 120))}m alt`,
+      description:
+        "Circular oblique ring around the footprint to capture facades and roof edges.",
+      templateType: "orbit",
+      orbitParams: {
+        ...DEFAULT_ORBIT_PARAMS,
+        center: [building.centroid.lat, building.centroid.lng],
+        radiusM: Math.round(clamp(footprintSizeM * 0.7, 18, 70)),
+        altitude: Math.round(clamp(estimatedHeightM + 18, 25, 120)),
+        numPoints: Math.round(clamp(Math.ceil(footprintSizeM / 6) + 6, 10, 20)),
+        clockwise: true,
+        createPoi: true,
+      },
+    },
+  ];
 }
 
 function buildFacadeVariants(
@@ -1274,6 +1369,7 @@ export function MapView() {
   const [facadeRecommendationBusy, setFacadeRecommendationBusy] =
     useState(false);
   const [showBuildings3D, setShowBuildings3D] = useState(false);
+  const programmaticTemplateModeRef = useRef<TemplateMode>(null);
 
   const warnings = useMemo(
     () => getObstacleWarnings(waypoints, obstacles),
@@ -1323,6 +1419,14 @@ export function MapView() {
       facadeSegmentOptions[0] ??
       null,
     [facadeSegmentOptions, selectedFacadeSegmentId],
+  );
+
+  const reconstructionPresets = useMemo(
+    () =>
+      detectedBuilding
+        ? buildReconstructionPresets(detectedBuilding, selectedFacadeSegment)
+        : [],
+    [detectedBuilding, selectedFacadeSegment],
   );
 
   const buildings3DView = useMemo(
@@ -1507,8 +1611,48 @@ export function MapView() {
   }, [applyFacadeScenario, facadeParams]);
 
   useEffect(() => {
+    if (programmaticTemplateModeRef.current === templateMode) {
+      programmaticTemplateModeRef.current = null;
+      return;
+    }
     resetTemplateState();
   }, [templateMode, resetTemplateState]);
+
+  const handleReconstructionPresetSelect = useCallback(
+    (presetId: string) => {
+      const preset = reconstructionPresets.find((item) => item.id === presetId);
+      if (!preset) return;
+
+      programmaticTemplateModeRef.current = preset.templateType;
+      setDragState(null);
+      setRawPath([]);
+      setTemplateConfirmed(true);
+      setDetectedBuilding(null);
+      setFacadeAssistSeedParams(null);
+      setFacadeSegmentOptions([]);
+      setSelectedFacadeSegmentId(null);
+      setFacadeVariantOptions([]);
+      setSelectedFacadeVariantId(null);
+      setFacadeAssistBusy(false);
+      setFacadeRecommendation(null);
+      setFacadeRecommendationBusy(false);
+
+      if (preset.templateType === "grid" && preset.gridParams) {
+        setOrbitParams(null);
+        setFacadeParams(null);
+        setPencilParams(null);
+        setGridParams(preset.gridParams);
+      } else if (preset.templateType === "orbit" && preset.orbitParams) {
+        setGridParams(null);
+        setFacadeParams(null);
+        setPencilParams(null);
+        setOrbitParams(preset.orbitParams);
+      }
+
+      setTemplateMode(preset.templateType);
+    },
+    [reconstructionPresets, setTemplateMode],
+  );
 
   const templatePreview = useMemo<TemplateResult | null>(() => {
     if (orbitParams) return generateOrbit(orbitParams);
@@ -2070,6 +2214,12 @@ export function MapView() {
                   }
                 : undefined
             }
+            onReconstructionPresetSelect={
+              activeTemplateType === "facade" &&
+              reconstructionPresets.length > 0
+                ? handleReconstructionPresetSelect
+                : undefined
+            }
             onFacadeSegmentSelect={
               activeTemplateType === "facade"
                 ? (segmentId) => {
@@ -2136,6 +2286,11 @@ export function MapView() {
             }
             facadeRecommendation={
               activeTemplateType === "facade" ? facadeRecommendation : null
+            }
+            reconstructionPresets={
+              activeTemplateType === "facade"
+                ? reconstructionPresets
+                : undefined
             }
             facadeSegments={
               activeTemplateType === "facade"

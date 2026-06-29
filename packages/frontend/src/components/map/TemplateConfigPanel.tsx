@@ -51,6 +51,7 @@ interface TemplateConfigPanelProps {
   onCancel: () => void;
   onFacadeAssist?: () => void;
   onFacadeObjectiveChange?: (objective: FacadeCopilotObjective) => void;
+  onReconstructionPresetSelect?: (presetId: string) => void;
   onFacadeSegmentSelect?: (segmentId: string) => void;
   onFacadeVariantSelect?: (variantId: string) => void;
   facadeObjective?: FacadeCopilotObjective;
@@ -58,6 +59,12 @@ interface TemplateConfigPanelProps {
   facadeAssistMessage?: string | null;
   facadeRecommendationBusy?: boolean;
   facadeRecommendation?: FacadeCopilotRecommendation | null;
+  reconstructionPresets?: Array<{
+    id: string;
+    label: string;
+    detail: string;
+    description: string;
+  }>;
   facadeSegments?: Array<{
     id: string;
     label: string;
@@ -88,6 +95,7 @@ export function TemplateConfigPanel({
   onCancel,
   onFacadeAssist,
   onFacadeObjectiveChange,
+  onReconstructionPresetSelect,
   onFacadeSegmentSelect,
   onFacadeVariantSelect,
   facadeObjective,
@@ -95,6 +103,7 @@ export function TemplateConfigPanel({
   facadeAssistMessage,
   facadeRecommendationBusy,
   facadeRecommendation,
+  reconstructionPresets,
   facadeSegments,
   facadeVariants,
   waypointCount,
@@ -511,6 +520,41 @@ export function TemplateConfigPanel({
                     <>
                       <p className="text-[10px] text-foreground">
                         {facadeRecommendation.summary}
+                        {reconstructionPresets &&
+                          reconstructionPresets.length > 0 &&
+                          onReconstructionPresetSelect && (
+                            <div className="space-y-1 rounded-md border border-emerald-500/25 bg-emerald-500/5 p-2">
+                              <p className="text-[10px] font-medium text-foreground">
+                                3D reconstruction
+                              </p>
+                              <p className="text-[10px] text-muted-foreground">
+                                Use the detected footprint to prepare a capture
+                                pattern for building reconstruction.
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {reconstructionPresets.map((preset) => (
+                                  <button
+                                    key={preset.id}
+                                    type="button"
+                                    onClick={() =>
+                                      onReconstructionPresetSelect(preset.id)
+                                    }
+                                    className="rounded-md border border-emerald-500/30 bg-background/70 px-2 py-1 text-left text-[10px] text-foreground hover:bg-emerald-500/10"
+                                  >
+                                    <span className="block font-medium">
+                                      {preset.label}
+                                    </span>
+                                    <span className="block text-muted-foreground">
+                                      {preset.detail}
+                                    </span>
+                                    <span className="block text-muted-foreground">
+                                      {preset.description}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                       </p>
                       <p className="text-[10px] text-muted-foreground">
                         Goal: {facadeRecommendation.objectiveLabel}. Recommended
