@@ -565,45 +565,6 @@ function buildFacadeScenario(
   };
 }
 
-function buildFacadeParamsFromDetection(
-  facadeParams: FacadeParams,
-  building: DetectedBuilding,
-): FacadeParams | null {
-  const segment = chooseFacadeSegment(
-    building.footprint,
-    { lat: facadeParams.point1[0], lng: facadeParams.point1[1] },
-    { lat: facadeParams.point2[0], lng: facadeParams.point2[1] },
-  );
-  if (!segment) return null;
-
-  const estimatedHeightM = clamp(
-    Math.round((building.estimatedHeightM ?? facadeParams.maxAltitude) + 4),
-    12,
-    120,
-  );
-  const distanceM = clamp(
-    Math.round(
-      Math.max(facadeParams.distanceM, Math.min(30, estimatedHeightM * 0.55)),
-    ),
-    8,
-    35,
-  );
-  const verticalStepM = Math.max(4, distanceM * 0.4);
-  const horizontalStepM = Math.max(4, distanceM * 0.55);
-
-  return {
-    ...facadeParams,
-    point1: [segment.start.lat, segment.start.lng],
-    point2: [segment.end.lat, segment.end.lng],
-    distanceM,
-    minAltitude: Math.min(facadeParams.minAltitude, 8),
-    maxAltitude: Math.max(facadeParams.minAltitude + 5, estimatedHeightM),
-    numRows: clamp(Math.ceil(estimatedHeightM / verticalStepM) + 1, 2, 12),
-    numColumns: clamp(Math.ceil(segment.lengthM / horizontalStepM) + 1, 3, 24),
-    addPhotos: true,
-  };
-}
-
 function buildBuildings3DView(args: {
   detectedBuilding: DetectedBuilding | null;
   selectedSegment: FacadeSegmentOption | null;
