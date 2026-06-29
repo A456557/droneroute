@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 interface ConfigState {
   selfHosted: boolean;
   googleClientId: string | null;
-  mapboxToken: string;
+  googleMapsApiKey: string;
   defaultMapView: MapViewState;
   loaded: boolean;
   fetchConfig: () => Promise<void>;
@@ -14,7 +14,7 @@ interface ConfigState {
 export const useConfigStore = create<ConfigState>((set) => ({
   selfHosted: true,
   googleClientId: null,
-  mapboxToken: "",
+  googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? "",
   defaultMapView: DEFAULT_MAP_VIEW,
   loaded: false,
 
@@ -23,13 +23,16 @@ export const useConfigStore = create<ConfigState>((set) => ({
       const res = await api.get<{
         selfHosted: boolean;
         googleClientId?: string;
-        mapboxToken?: string;
+        googleMapsApiKey?: string;
         defaultMapView?: MapViewState;
       }>("/config");
       set({
         selfHosted: res.selfHosted,
         googleClientId: res.googleClientId ?? null,
-        mapboxToken: res.mapboxToken ?? "",
+        googleMapsApiKey:
+          res.googleMapsApiKey ??
+          import.meta.env.VITE_GOOGLE_MAPS_API_KEY ??
+          "",
         defaultMapView: res.defaultMapView ?? DEFAULT_MAP_VIEW,
         loaded: true,
       });
@@ -38,7 +41,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
       set({
         selfHosted: true,
         googleClientId: null,
-        mapboxToken: "",
+        googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? "",
         defaultMapView: DEFAULT_MAP_VIEW,
         loaded: true,
       });

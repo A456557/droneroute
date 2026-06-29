@@ -9,6 +9,7 @@ import { kmzRoutes } from "./routes/kmz.js";
 import { authRoutes } from "./routes/auth.js";
 import { sharedRoutes } from "./routes/shared.js";
 import { airspaceRoutes } from "./routes/airspace.js";
+import { buildingRoutes } from "./routes/buildings.js";
 import { adminRoutes } from "./routes/admin.js";
 import { preferencesRoutes } from "./routes/preferences.js";
 import { globalLimiter } from "./middleware/rateLimit.js";
@@ -22,9 +23,8 @@ const PORT = process.env.PORT || 3001;
 // Trust reverse proxy (e.g. nginx, Docker) so rate limiting uses real client IP
 app.set("trust proxy", 1);
 
-// Security headers. CSP and COEP are disabled because the SPA embeds Mapbox GL
-// (web workers loaded from blob: URLs) and, in cloud mode, Google OAuth — a strict
-// CSP/COEP breaks both. All other baseline headers (nosniff, frameguard, HSTS,
+// Security headers. CSP and COEP are disabled because the SPA embeds Google Maps
+// and, in cloud mode, Google OAuth — a strict CSP/COEP breaks both. All other baseline headers (nosniff, frameguard, HSTS,
 // referrer-policy, …) are applied. Tightening CSP is tracked as a follow-up.
 app.use(
   helmet({
@@ -64,6 +64,7 @@ app.use("/api/kmz", kmzRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/preferences", preferencesRoutes);
 app.use("/api/airspace", airspaceRoutes);
+app.use("/api/buildings", buildingRoutes);
 app.use("/api", sharedRoutes);
 
 // Health check
@@ -77,7 +78,10 @@ app.get("/api/config", (_req, res) => {
   res.json({
     selfHosted,
     googleClientId: selfHosted ? undefined : process.env.GOOGLE_CLIENT_ID,
-    mapboxToken: process.env.MAPBOX_TOKEN || "",
+    googleMapsApiKey:
+      process.env.GOOGLE_MAPS_API_KEY ||
+      process.env.VITE_GOOGLE_MAPS_API_KEY ||
+      "",
     defaultMapView: resolveDefaultMapView(),
   });
 });

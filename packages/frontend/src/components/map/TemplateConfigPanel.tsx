@@ -25,6 +25,10 @@ import {
   speedRange,
 } from "@/lib/units";
 import type {
+  FacadeCopilotObjective,
+  FacadeCopilotRecommendation,
+} from "@/lib/api";
+import type {
   TemplateType,
   OrbitParams,
   GridParams,
@@ -45,6 +49,27 @@ interface TemplateConfigPanelProps {
   onPencilChange?: (params: PencilParams) => void;
   onApply: () => void;
   onCancel: () => void;
+  onFacadeAssist?: () => void;
+  onFacadeObjectiveChange?: (objective: FacadeCopilotObjective) => void;
+  onFacadeSegmentSelect?: (segmentId: string) => void;
+  onFacadeVariantSelect?: (variantId: string) => void;
+  facadeObjective?: FacadeCopilotObjective;
+  facadeAssistBusy?: boolean;
+  facadeAssistMessage?: string | null;
+  facadeRecommendationBusy?: boolean;
+  facadeRecommendation?: FacadeCopilotRecommendation | null;
+  facadeSegments?: Array<{
+    id: string;
+    label: string;
+    detail: string;
+    selected: boolean;
+  }>;
+  facadeVariants?: Array<{
+    id: string;
+    label: string;
+    detail: string;
+    selected: boolean;
+  }>;
   waypointCount: number;
   pois?: PointOfInterest[];
 }
@@ -61,6 +86,17 @@ export function TemplateConfigPanel({
   onPencilChange,
   onApply,
   onCancel,
+  onFacadeAssist,
+  onFacadeObjectiveChange,
+  onFacadeSegmentSelect,
+  onFacadeVariantSelect,
+  facadeObjective,
+  facadeAssistBusy,
+  facadeAssistMessage,
+  facadeRecommendationBusy,
+  facadeRecommendation,
+  facadeSegments,
+  facadeVariants,
   waypointCount,
   pois,
 }: TemplateConfigPanelProps) {
@@ -81,6 +117,15 @@ export function TemplateConfigPanel({
         : type === "facade"
           ? "Vertical scanning pattern along a wall or building face. Set the standoff distance, altitude range, and grid density for full coverage."
           : "Freehand flight path drawn on the map. Adjust the number of waypoints to control how closely the path is followed.";
+  const facadeObjectives: Array<{
+    value: FacadeCopilotObjective;
+    label: string;
+  }> = [
+    { value: "balanced", label: "Balanced coverage" },
+    { value: "inspection", label: "Inspection detail" },
+    { value: "reconstruction", label: "3D reconstruction" },
+    { value: "speed", label: "Fast capture" },
+  ];
 
   // Stop all pointer/keyboard/wheel events from reaching Leaflet (native DOM level)
   const panelRef = useRef<HTMLDivElement>(null);
@@ -391,6 +436,162 @@ export function TemplateConfigPanel({
               Photos
             </label>
           </div>
+          {onFacadeAssist && (
+            <div className="col-span-2 space-y-2 rounded-md border border-border/80 bg-background/70 p-2">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-medium">Building assist</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Detect the closest footprint and auto-fit the facade scan.
+                  </p>
+                  {onFacadeObjectiveChange && facadeObjective && (
+                    <div className="mt-2 max-w-[220px] space-y-1">
+                      <Label className="text-[10px] text-muted-foreground">
+                        Mission goal
+                      </Label>
+                      <Select
+                        value={facadeObjective}
+                        onValueChange={(value) =>
+                          onFacadeObjectiveChange(
+                            value as FacadeCopilotObjective,
+                          )
+                        }
+                      >
+                        <SelectTrigger className="h-7 text-[11px]">
+                          <SelectValue placeholder="Choose a goal" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {facadeObjectives.map((objective) => (
+                            <SelectItem
+                              key={objective.value}
+                              value={objective.value}
+                            >
+                              {objective.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={onFacadeAssist}
+                  disabled={facadeAssistBusy}
+                  className="h-7 text-[11px]"
+                >
+                  {facadeAssistBusy ? "Analyzing..." : "Auto-fit"}
+                </Button>
+              </div>
+              {facadeAssistMessage && (
+                <p className="text-[10px] text-muted-foreground">
+                  {facadeAssistMessage}
+                </p>
+              )}
+              {(facadeRecommendationBusy || facadeRecommendation) && (
+                <div className="space-y-1 rounded-md border border-cyan-500/30 bg-cyan-500/5 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] font-medium text-foreground">
+                      Copilot recommendation
+                    </p>
+                    {facadeRecommendation && (
+                      <span className="text-[10px] text-cyan-300">
+                        {Math.round(facadeRecommendation.confidence * 100)}%
+                      </span>
+                    )}
+                  </div>
+                  {facadeRecommendationBusy && !facadeRecommendation ? (
+                    <p className="text-[10px] text-muted-foreground">
+                      Building a facade recommendation...
+                    </p>
+                  ) : null}
+                  {facadeRecommendation && (
+                    <>
+                      <p className="text-[10px] text-foreground">
+                        {facadeRecommendation.summary}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">
+                        Goal: {facadeRecommendation.objectiveLabel}. Recommended
+                        variant: {facadeRecommendation.recommendedVariantLabel}.
+                        {facadeRecommendation.currentVariantMatchesRecommendation ===
+                        true
+                          ? " Current selection matches."
+                          : facadeRecommendation.currentVariantMatchesRecommendation ===
+                              false
+                            ? " Current selection differs."
+                            : ""}
+                      </p>
+                      {facadeRecommendation.rationale
+                        .slice(0, 2)
+                        .map((reason) => (
+                          <p
+                            key={reason}
+                            className="text-[10px] text-muted-foreground"
+                          >
+                            • {reason}
+                          </p>
+                        ))}
+                      {facadeRecommendation.risks.slice(0, 1).map((risk) => (
+                        <p key={risk} className="text-[10px] text-amber-200/90">
+                          Risk: {risk}
+                        </p>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+              {facadeSegments &&
+                facadeSegments.length > 0 &&
+                onFacadeSegmentSelect && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] font-medium text-foreground">
+                      Detected facades
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {facadeSegments.map((segment) => (
+                        <button
+                          key={segment.id}
+                          type="button"
+                          onClick={() => onFacadeSegmentSelect(segment.id)}
+                          className={`rounded-md border px-2 py-1 text-left text-[10px] ${segment.selected ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
+                        >
+                          <span className="block font-medium">
+                            {segment.label}
+                          </span>
+                          <span className="block">{segment.detail}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              {facadeVariants &&
+                facadeVariants.length > 0 &&
+                onFacadeVariantSelect && (
+                  <div className="space-y-1">
+                    <p className="text-[10px] font-medium text-foreground">
+                      Scan variants
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {facadeVariants.map((variant) => (
+                        <button
+                          key={variant.id}
+                          type="button"
+                          onClick={() => onFacadeVariantSelect(variant.id)}
+                          className={`rounded-md border px-2 py-1 text-left text-[10px] ${variant.selected ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
+                        >
+                          <span className="block font-medium">
+                            {variant.label}
+                          </span>
+                          <span className="block">{variant.detail}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+            </div>
+          )}
         </div>
       )}
 

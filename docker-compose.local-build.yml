@@ -15,7 +15,10 @@ services:
     restart: unless-stopped
 
   droneroute:
-    image: fcsonline/droneroute:latest
+    build:
+      context: .
+      args:
+        COMMIT_SHA: ${COMMIT_SHA:-dev}
     # To build from source instead, comment out "image" above and uncomment:
     # build:
     #   context: .

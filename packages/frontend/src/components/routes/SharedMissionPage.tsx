@@ -13,8 +13,7 @@ import {
   User,
   ArrowLeft,
 } from "lucide-react";
-import Map, { Source, Layer, Marker } from "react-map-gl/mapbox";
-import "mapbox-gl/dist/mapbox-gl.css";
+import { APIProvider, Map } from "@vis.gl/react-google-maps";
 import { Button } from "@/components/ui/button";
 import { useMissionStore } from "@/store/missionStore";
 import { useAuthStore } from "@/store/authStore";
@@ -22,6 +21,11 @@ import { useConfigStore } from "@/store/configStore";
 import { api } from "@/lib/api";
 import { DRONE_MODELS } from "@droneroute/shared";
 import { getObstacleWarnings } from "@/lib/geo";
+import {
+  MarkerOverlay,
+  PolygonOverlay,
+  PolylineOverlay,
+} from "@/components/map/googleMapOverlays";
 import type {
   Waypoint,
   MissionConfig,
@@ -119,7 +123,7 @@ function SharedMissionMap({
   pois: PointOfInterest[];
   obstacles: Obstacle[];
 }) {
-  const mapboxToken = useConfigStore((s) => s.mapboxToken);
+  const googleMapsApiKey = useConfigStore((s) => s.googleMapsApiKey);
   const warnings = useMemo(
     () => getObstacleWarnings(waypoints, obstacles),
     [waypoints, obstacles],
@@ -132,183 +136,79 @@ function SharedMissionMap({
     return set;
   }, [warnings]);
 
-  // Flight path GeoJSON
-  const flightPathGeojson = useMemo(() => {
-    if (waypoints.length < 2) return null;
-    const features = waypoints.slice(0, -1).map((wp, i) => {
-      const next = waypoints[i + 1];
-      return {
-        type: "Feature" as const,
-        properties: {
-          color: warningSegments.has(wp.index) ? "#ef4444" : "#3b82f6",
-        },
-        geometry: {
-          type: "LineString" as const,
-          coordinates: [
-            [wp.longitude, wp.latitude],
-            [next.longitude, next.latitude],
-          ],
-        },
-      };
-    });
-    return { type: "FeatureCollection" as const, features };
-  }, [waypoints, warningSegments]);
-
-  // Obstacle polygons GeoJSON
-  const obstacleGeojson = useMemo(() => {
-    const features = obstacles.map((obs) => {
-      const ring = [
-        ...obs.vertices.map(([lat, lng]) => [lng, lat]),
-        [obs.vertices[0][1], obs.vertices[0][0]],
-      ];
-      return {
-        type: "Feature" as const,
-        properties: {},
-        geometry: { type: "Polygon" as const, coordinates: [ring] },
-      };
-    });
-    return { type: "FeatureCollection" as const, features };
-  }, [obstacles]);
-
-  // Compute bounds for initial view
-  const bounds = useMemo(() => {
-    const allPoints = [
-      ...waypoints.map((wp) => [wp.longitude, wp.latitude] as [number, number]),
-      ...pois.map((p) => [p.longitude, p.latitude] as [number, number]),
-      ...obstacles.flatMap((o) =>
-        o.vertices.map((v) => [v[1], v[0]] as [number, number]),
-      ),
-    ];
-    if (allPoints.length === 0) return null;
-    let minLng = Infinity,
-      maxLng = -Infinity,
-      minLat = Infinity,
-      maxLat = -Infinity;
-    for (const [lng, lat] of allPoints) {
-      if (lng < minLng) minLng = lng;
-      if (lng > maxLng) maxLng = lng;
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
-    }
-    return [
-      [minLng, minLat],
-      [maxLng, maxLat],
-    ] as [[number, number], [number, number]];
-  }, [waypoints, pois, obstacles]);
-
   const center: [number, number] =
     waypoints.length > 0
       ? [waypoints[0].longitude, waypoints[0].latitude]
       : [2.1686, 41.3874];
 
-  if (!mapboxToken) return null;
+  if (!googleMapsApiKey) return null;
 
   return (
     <div className="h-[360px] w-full rounded-lg overflow-hidden border border-border">
-      <Map
-        mapboxAccessToken={mapboxToken}
-        initialViewState={{
-          longitude: center[0],
-          latitude: center[1],
-          zoom: 14,
-          ...(bounds
-            ? {
-                bounds: bounds,
-                fitBoundsOptions: { padding: 40, maxZoom: 16 },
+      <APIProvider apiKey={googleMapsApiKey}>
+        <Map
+          defaultCenter={{ lat: center[1], lng: center[0] }}
+          defaultZoom={14}
+          mapTypeId="roadmap"
+          disableDefaultUI
+          clickableIcons={false}
+          className="h-full w-full"
+        >
+          {waypoints.slice(0, -1).map((wp, i) => {
+            const next = waypoints[i + 1];
+            return (
+              <PolylineOverlay
+                key={`shared-flight-${wp.index}-${next.index}`}
+                path={[
+                  { lat: wp.latitude, lng: wp.longitude },
+                  { lat: next.latitude, lng: next.longitude },
+                ]}
+                strokeColor={
+                  warningSegments.has(wp.index) ? "#ef4444" : "#3b82f6"
+                }
+                strokeOpacity={0.85}
+                strokeWeight={3}
+              />
+            );
+          })}
+
+          {obstacles.map((obstacle) => (
+            <PolygonOverlay
+              key={`shared-obstacle-${obstacle.id}`}
+              path={obstacle.vertices.map(([lat, lng]) => ({ lat, lng }))}
+              strokeColor="#ef4444"
+              fillColor="#ef4444"
+              fillOpacity={0.12}
+            />
+          ))}
+
+          {waypoints.map((wp, i) => (
+            <MarkerOverlay
+              key={`shared-wp-${wp.index}`}
+              position={{ lat: wp.latitude, lng: wp.longitude }}
+              fillColor={
+                i === 0
+                  ? "#22c55e"
+                  : i === waypoints.length - 1
+                    ? "#ef4444"
+                    : "#3b82f6"
               }
-            : {}),
-        }}
-        style={{ width: "100%", height: "100%" }}
-        mapStyle="mapbox://styles/mapbox/dark-v11"
-        doubleClickZoom={false}
-        attributionControl={false}
-      >
-        {/* Flight path */}
-        {flightPathGeojson && (
-          <Source
-            id="shared-flight-path"
-            type="geojson"
-            data={flightPathGeojson}
-          >
-            <Layer
-              id="shared-flight-path-line"
-              type="line"
-              paint={{
-                "line-color": ["get", "color"],
-                "line-width": 3,
-                "line-opacity": 0.8,
-                "line-dasharray": [2, 1.2],
-              }}
+              strokeColor="#bfdbfe"
+              scale={7}
             />
-          </Source>
-        )}
+          ))}
 
-        {/* Obstacle polygons */}
-        {obstacles.length > 0 && (
-          <Source id="shared-obstacles" type="geojson" data={obstacleGeojson}>
-            <Layer
-              id="shared-obstacles-fill"
-              type="fill"
-              paint={{ "fill-color": "#ef4444", "fill-opacity": 0.12 }}
+          {pois.map((poi) => (
+            <MarkerOverlay
+              key={`shared-poi-${poi.id}`}
+              position={{ lat: poi.latitude, lng: poi.longitude }}
+              fillColor="#f59e0b"
+              strokeColor="#fcd34d"
+              scale={6}
             />
-            <Layer
-              id="shared-obstacles-outline"
-              type="line"
-              paint={{
-                "line-color": "#ef4444",
-                "line-width": 2,
-                "line-opacity": 0.7,
-              }}
-            />
-          </Source>
-        )}
-
-        {/* Waypoint markers */}
-        {waypoints.map((wp, i) => (
-          <Marker
-            key={`wp-${wp.index}`}
-            longitude={wp.longitude}
-            latitude={wp.latitude}
-            anchor="center"
-          >
-            <div
-              style={{
-                width: 12,
-                height: 12,
-                borderRadius: "50%",
-                background:
-                  i === 0
-                    ? "#22c55e"
-                    : i === waypoints.length - 1
-                      ? "#ef4444"
-                      : "#3b82f6",
-                border: "2px solid #3b82f6",
-              }}
-            />
-          </Marker>
-        ))}
-
-        {/* POI markers */}
-        {pois.map((poi) => (
-          <Marker
-            key={`poi-${poi.id}`}
-            longitude={poi.longitude}
-            latitude={poi.latitude}
-            anchor="center"
-          >
-            <div
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                background: "#f59e0b",
-                border: "2px solid #f59e0b",
-                opacity: 0.8,
-              }}
-            />
-          </Marker>
-        ))}
-      </Map>
+          ))}
+        </Map>
+      </APIProvider>
     </div>
   );
 }
