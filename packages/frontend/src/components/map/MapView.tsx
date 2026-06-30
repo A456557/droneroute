@@ -15,17 +15,24 @@ import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
 import { useAirspaceStore } from "@/store/airspaceStore";
-import { getObstacleWarnings } from "@/lib/geo";
+import { getObstacleWarnings, pointInPolygon } from "@/lib/geo";
 import {
+  type BdnbBuildingEnrichment,
   buildingApi,
+  type BdTopoMatchedBuilding,
+  type DetectBuildingResponse,
   type FacadeCopilotObjective,
   type DetectedBuilding,
   type FacadeCopilotRecommendation,
+  type RnbBuilding,
 } from "@/lib/api";
 import {
   DEFAULT_FACADE_PARAMS,
   DEFAULT_GRID_PARAMS,
   DEFAULT_ORBIT_PARAMS,
+  MISSION_PLANNER_DENSE_FACADE_PARAMS,
+  MISSION_PLANNER_3D_GRID_PARAMS,
+  MISSION_PLANNER_VERTICAL_FACADE_PARAMS,
   DEFAULT_PENCIL_PARAMS,
   generateFacade,
   generateGrid,
@@ -46,6 +53,7 @@ import {
   PolygonOverlay,
   PolylineOverlay,
 } from "./googleMapOverlays";
+import { RnbBuildingsLayer } from "./RnbBuildingsLayer";
 
 type LatLng = google.maps.LatLngLiteral;
 type TemplateMode = "orbit" | "grid" | "facade" | "pencil" | null;
@@ -77,6 +85,13 @@ type Buildings3DView = {
   subtitle: string;
 };
 
+type MainMapViewport = {
+  center: LatLng;
+  zoom: number;
+  heading: number;
+  tilt: number;
+};
+
 type Buildings3DMarker = {
   id: string;
   position: google.maps.LatLngLiteral;
@@ -88,19 +103,365 @@ type Buildings3DMarker = {
   scale?: number;
 };
 
+type Buildings3DScanRoute = {
+  title: string;
+  path: google.maps.LatLngAltitudeLiteral[];
+  waypointMarkers: Buildings3DMarker[];
+};
+
 type ReconstructionPresetOption = {
   id: string;
   label: string;
   detail: string;
   description: string;
-  templateType: Exclude<TemplateMode, "facade" | "pencil" | null>;
+  templateType: Exclude<TemplateMode, "pencil" | null>;
   orbitParams?: OrbitParams;
   gridParams?: GridParams;
+  facadeParams?: FacadeParams;
+};
+
+type StreetViewContext = {
+  status: "available" | "unavailable" | "unknown";
+  panoramaLocation: LatLng | null;
+  distanceM: number | null;
+  headingFromBuildingDeg: number | null;
+  label: string;
+};
+
+type ReconstructedBuildingShell = {
+  roofCoordinates: google.maps.LatLngAltitudeLiteral[];
+  ridgeCoordinates: google.maps.LatLngAltitudeLiteral[] | null;
+  estimatedHeightM: number;
+  wallHeightM: number;
+  roofPeakHeightM: number;
+  confidencePercent: number;
+  roofStyleLabel: string;
+  heightSourceLabel: string;
+  streetViewLabel: string;
+  sourceSummary: string;
+  note: string;
+};
+
+type SelectedRnbBuilding = {
+  building: RnbBuilding;
+  position: google.maps.LatLngLiteral;
+};
+
+type BuildingDetectionCacheEntry = {
+  center: LatLng;
+  radiusM: number;
+  response: DetectBuildingResponse;
+  cachedAt: number;
 };
 
 const MIN_PENCIL_PATH_LENGTH_M = 10;
 const ROADMAP_TYPE = "roadmap" as google.maps.MapTypeId;
 const HYBRID_TYPE = "hybrid" as google.maps.MapTypeId;
+const RECONSTRUCTION_DEMO_QUERY = "facade-reconstruction";
+const BUILDING_DETECTION_CACHE_KEY = "droneroute-building-detection-cache-v1";
+const BUILDING_DETECTION_CACHE_MAX_ENTRIES = 12;
+const BUILDING_DETECTION_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 6;
+const RECONSTRUCTION_DEMO_PRESET = {
+  searchLabel: "Siurana, Tarragona",
+  facadeParams: {
+    point1: [41.25841, 0.93216] as [number, number],
+    point2: [41.25831, 0.93245] as [number, number],
+    ...DEFAULT_FACADE_PARAMS,
+  },
+  objective: "reconstruction" as FacadeCopilotObjective,
+};
+const RECONSTRUCTION_DEMO_BUILDING: DetectedBuilding = {
+  id: "demo-siurana-building",
+  footprint: [
+    { lat: 41.258415, lng: 0.9322 },
+    { lat: 41.258431, lng: 0.932314 },
+    { lat: 41.258335, lng: 0.932332 },
+    { lat: 41.258319, lng: 0.932218 },
+    { lat: 41.258415, lng: 0.9322 },
+  ],
+  centroid: { lat: 41.258375, lng: 0.932266 },
+  confidence: 0.88,
+  estimatedHeightM: 18,
+  heightSource: "osm-height",
+  levels: 2,
+  roofShape: "gabled",
+  roofDirectionDeg: 102,
+  roofHeightM: 4,
+  source: "demo-fixture",
+  distanceToQueryM: 8,
+};
+
+function loadBuildingDetectionCache(): BuildingDetectionCacheEntry[] {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const raw = window.localStorage.getItem(BUILDING_DETECTION_CACHE_KEY);
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    const now = Date.now();
+    return parsed.filter((entry): entry is BuildingDetectionCacheEntry => {
+      return (
+        entry &&
+        Number.isFinite(entry?.center?.lat) &&
+        Number.isFinite(entry?.center?.lng) &&
+        Number.isFinite(entry?.radiusM) &&
+        Number.isFinite(entry?.cachedAt) &&
+        now - entry.cachedAt < BUILDING_DETECTION_CACHE_MAX_AGE_MS &&
+        entry.response?.building &&
+        Array.isArray(entry.response?.candidates)
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveBuildingDetectionCache(entries: BuildingDetectionCacheEntry[]) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      BUILDING_DETECTION_CACHE_KEY,
+      JSON.stringify(entries),
+    );
+  } catch {
+    // Ignore storage quota or serialization errors.
+  }
+}
+
+function rememberBuildingDetection(
+  cacheRef: { current: BuildingDetectionCacheEntry[] },
+  center: LatLng,
+  radiusM: number,
+  response: DetectBuildingResponse,
+) {
+  const now = Date.now();
+  const nextEntries = [
+    {
+      center,
+      radiusM,
+      response,
+      cachedAt: now,
+    },
+    ...cacheRef.current.filter(
+      (entry) =>
+        now - entry.cachedAt < BUILDING_DETECTION_CACHE_MAX_AGE_MS &&
+        haversine(entry.center.lat, entry.center.lng, center.lat, center.lng) >
+          Math.max(35, radiusM * 0.45),
+    ),
+  ].slice(0, BUILDING_DETECTION_CACHE_MAX_ENTRIES);
+
+  cacheRef.current = nextEntries;
+  saveBuildingDetectionCache(nextEntries);
+}
+
+function toDetectedBuildingFromRnb(
+  building: RnbBuilding,
+  bdTopoBuilding?: BdTopoMatchedBuilding | null,
+): DetectedBuilding {
+  return {
+    id: `rnb-${building.rnbId}`,
+    footprint: building.footprint,
+    centroid: building.point,
+    confidence: 0.98,
+    estimatedHeightM: bdTopoBuilding?.heightM ?? null,
+    heightSource: bdTopoBuilding?.heightM != null ? "osm-height" : null,
+    levels: bdTopoBuilding?.floorCount ?? null,
+    roofShape: null,
+    roofDirectionDeg: null,
+    roofHeightM: null,
+    source: "rnb",
+    distanceToQueryM: 0,
+  };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function buildRnbInfoWindowContent(args: {
+  building: RnbBuilding;
+  bdTopoBuilding: BdTopoMatchedBuilding | null;
+  threeDMarkers: Buildings3DMarker[];
+  approximateBuildingShell: ReconstructedBuildingShell | null;
+  loading: boolean;
+}): string {
+  const {
+    building,
+    bdTopoBuilding,
+    threeDMarkers,
+    approximateBuildingShell,
+    loading,
+  } = args;
+  const rnbStatus = building.status ?? "unknown";
+  const bdTopoHeight =
+    bdTopoBuilding?.heightM != null
+      ? `${Math.round(bdTopoBuilding.heightM)} m`
+      : "n/a";
+  const bdTopoFloors =
+    bdTopoBuilding?.floorCount != null
+      ? String(Math.round(bdTopoBuilding.floorCount))
+      : "n/a";
+  const usageLine = [bdTopoBuilding?.usage1, bdTopoBuilding?.usage2]
+    .filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    )
+    .join(" / ");
+  const footprintForSegments = bdTopoBuilding?.footprint ?? building.footprint;
+  const footprintMetrics = footprintMetricsSummary(footprintForSegments);
+  const segmentLengthsHtml =
+    buildFootprintSegmentLengthsHtml(footprintForSegments);
+  const markersHtml = threeDMarkers
+    .map(
+      (marker) =>
+        `<div><strong>${escapeHtml(marker.glyph)}:</strong> ${escapeHtml(marker.label)}</div>`,
+    )
+    .join("");
+
+  return `<div style="font-size:12px;min-width:220px;max-width:300px;line-height:1.45;color:#000000;background:#ffffff">
+    <div style="font-weight:700;margin-bottom:4px;color:#000000">Bâtiment RNB</div>
+    <div><strong>RNB:</strong> ${escapeHtml(building.rnbId)}</div>
+    <div><strong>Statut:</strong> ${escapeHtml(rnbStatus)}</div>
+    <div><strong>Adresses liées:</strong> ${building.addressCount}</div>
+    <div><strong>Actif:</strong> ${building.isActive ? "oui" : "non"}</div>
+    <div style="margin-top:6px;font-weight:700;color:#000000">BD TOPO</div>
+    ${loading ? '<div style="color:#000000">Chargement BD TOPO…</div>' : ""}
+    <div><strong>Cleabs:</strong> ${escapeHtml(bdTopoBuilding?.cleabs ?? building.bdTopoId ?? "n/a")}</div>
+    <div><strong>Nature:</strong> ${escapeHtml(bdTopoBuilding?.nature ?? "n/a")}</div>
+    <div><strong>Usage:</strong> ${escapeHtml(usageLine || "n/a")}</div>
+    <div><strong>Hauteur:</strong> ${escapeHtml(bdTopoHeight)}</div>
+    <div><strong>Étages:</strong> ${escapeHtml(bdTopoFloors)}</div>
+    <div><strong>Origine:</strong> ${escapeHtml(bdTopoBuilding?.origin ?? "n/a")}</div>
+    <div style="margin-top:6px;font-weight:700;color:#000000">Dimensions</div>
+    <div><strong>Périmètre:</strong> ${escapeHtml(footprintMetrics.perimeterLabel)}</div>
+    <div><strong>Longueur max:</strong> ${escapeHtml(footprintMetrics.lengthLabel)}</div>
+    <div><strong>Largeur max:</strong> ${escapeHtml(footprintMetrics.widthLabel)}</div>
+    <div><strong>Surface approx.:</strong> ${escapeHtml(footprintMetrics.areaLabel)}</div>
+    ${segmentLengthsHtml ? `<div style="margin-top:6px;font-weight:700;color:#000000">Segments du polygone</div>${segmentLengthsHtml}` : ""}
+    ${threeDMarkers.length > 0 ? `<div style="margin-top:6px;font-weight:700;color:#000000">3D mission markers</div>${markersHtml}` : ""}
+    ${
+      approximateBuildingShell
+        ? `<div style="margin-top:6px;font-weight:700;color:#000000">Hybrid 3D building estimate</div>
+    <div>${escapeHtml(approximateBuildingShell.roofStyleLabel)} at about ${escapeHtml(String(Math.round(approximateBuildingShell.estimatedHeightM)))}m.</div>
+    <div style="color:#000000">${escapeHtml(approximateBuildingShell.heightSourceLabel)} / ${escapeHtml(approximateBuildingShell.streetViewLabel)}</div>
+    <div><strong>Credibility:</strong> ${escapeHtml(String(approximateBuildingShell.confidencePercent))}%</div>`
+        : ""
+    }
+  </div>`;
+}
+
+function buildFootprintSegmentLengthsHtml(footprint: LatLng[]): string {
+  if (footprint.length < 2) {
+    return "";
+  }
+
+  const hasClosingPoint =
+    footprint.length >= 2 &&
+    footprint[0].lat === footprint[footprint.length - 1].lat &&
+    footprint[0].lng === footprint[footprint.length - 1].lng;
+  const segmentCount = hasClosingPoint
+    ? footprint.length - 1
+    : footprint.length;
+
+  if (segmentCount < 2) {
+    return "";
+  }
+
+  const rows: string[] = [];
+  for (let index = 0; index < segmentCount; index += 1) {
+    const start = footprint[index];
+    const end = footprint[(index + 1) % segmentCount];
+    const lengthM = haversine(start.lat, start.lng, end.lat, end.lng);
+    rows.push(
+      `<div><strong>S${index + 1}:</strong> ${escapeHtml(lengthM.toFixed(1))} m</div>`,
+    );
+  }
+
+  return rows.join("");
+}
+
+function footprintMetricsSummary(footprint: LatLng[]): {
+  perimeterLabel: string;
+  lengthLabel: string;
+  widthLabel: string;
+  areaLabel: string;
+} {
+  const normalized = normalizeFootprint(footprint);
+  if (normalized.length < 3) {
+    return {
+      perimeterLabel: "n/a",
+      lengthLabel: "n/a",
+      widthLabel: "n/a",
+      areaLabel: "n/a",
+    };
+  }
+
+  let perimeterM = 0;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const current = normalized[index];
+    const next = normalized[(index + 1) % normalized.length];
+    perimeterM += haversine(current.lat, current.lng, next.lat, next.lng);
+  }
+
+  const centroid = footprintCentroid(normalized);
+  const localPoints = normalized.map((point) => toLocalXY(centroid, point));
+  const primaryBearing = longestEdgeBearing(normalized) ?? 0;
+  const projected = localPoints.map((point) =>
+    projectOnBearingAxis(point, primaryBearing),
+  );
+  const uValues = projected.map((point) => point.u);
+  const vValues = projected.map((point) => point.v);
+  const maxLengthM = Math.max(...uValues) - Math.min(...uValues);
+  const maxWidthM = Math.max(...vValues) - Math.min(...vValues);
+  const areaM2 = footprintAreaMeters(normalized);
+
+  return {
+    perimeterLabel: `${perimeterM.toFixed(1)} m`,
+    lengthLabel: `${Math.max(maxLengthM, maxWidthM).toFixed(1)} m`,
+    widthLabel: `${Math.min(maxLengthM, maxWidthM).toFixed(1)} m`,
+    areaLabel: `${Math.round(areaM2)} m²`,
+  };
+}
+
+function findCachedBuildingDetection(
+  cacheRef: { current: BuildingDetectionCacheEntry[] },
+  center: LatLng,
+  radiusM: number,
+): DetectBuildingResponse | null {
+  const now = Date.now();
+  const freshEntries = cacheRef.current.filter(
+    (entry) => now - entry.cachedAt < BUILDING_DETECTION_CACHE_MAX_AGE_MS,
+  );
+
+  if (freshEntries.length !== cacheRef.current.length) {
+    cacheRef.current = freshEntries;
+    saveBuildingDetectionCache(freshEntries);
+  }
+
+  const maxDistanceM = Math.max(90, radiusM * 1.8);
+  const bestMatch = freshEntries
+    .map((entry) => ({
+      entry,
+      distanceM: haversine(
+        entry.center.lat,
+        entry.center.lng,
+        center.lat,
+        center.lng,
+      ),
+    }))
+    .filter((candidate) => candidate.distanceM <= maxDistanceM)
+    .sort((left, right) => left.distanceM - right.distanceM)[0];
+
+  return bestMatch?.entry.response ?? null;
+}
 
 function dashedIcon(strokeColor: string): google.maps.IconSequence[] {
   return [
@@ -303,6 +664,122 @@ function normalizeFootprint(points: LatLng[]): LatLng[] {
   return uniquePoints.length >= 3 ? uniquePoints : points;
 }
 
+function footprintCentroid(points: LatLng[]): LatLng {
+  const normalized = normalizeFootprint(points);
+  if (normalized.length === 0) return { lat: 0, lng: 0 };
+
+  const total = normalized.reduce(
+    (acc, point) => ({ lat: acc.lat + point.lat, lng: acc.lng + point.lng }),
+    { lat: 0, lng: 0 },
+  );
+
+  return {
+    lat: total.lat / normalized.length,
+    lng: total.lng / normalized.length,
+  };
+}
+
+function fromLocalXY(origin: LatLng, x: number, y: number): LatLng {
+  const [lat, lng] = offsetMeters(origin.lat, origin.lng, y, x);
+  return { lat, lng };
+}
+
+function projectOnBearingAxis(
+  point: { x: number; y: number },
+  bearingDeg: number,
+): { u: number; v: number } {
+  const radians = deg2rad(bearingDeg);
+  const axisEast = Math.sin(radians);
+  const axisNorth = Math.cos(radians);
+
+  return {
+    u: point.x * axisEast + point.y * axisNorth,
+    v: point.x * axisNorth - point.y * axisEast,
+  };
+}
+
+function unprojectFromBearingAxis(
+  origin: LatLng,
+  bearingDeg: number,
+  u: number,
+  v: number,
+): LatLng {
+  const radians = deg2rad(bearingDeg);
+  const x = u * Math.sin(radians) + v * Math.cos(radians);
+  const y = u * Math.cos(radians) - v * Math.sin(radians);
+  return fromLocalXY(origin, x, y);
+}
+
+function footprintAreaMeters(points: LatLng[]): number {
+  const normalized = normalizeFootprint(points);
+  if (normalized.length < 3) return 0;
+
+  const origin = normalized[0];
+  const localPoints = normalized.map((point) => toLocalXY(origin, point));
+  let area = 0;
+
+  for (let index = 0; index < localPoints.length; index++) {
+    const current = localPoints[index];
+    const next = localPoints[(index + 1) % localPoints.length];
+    area += current.x * next.y - next.x * current.y;
+  }
+
+  return Math.abs(area / 2);
+}
+
+function longestEdgeBearing(points: LatLng[]): number | null {
+  const normalized = normalizeFootprint(points);
+  if (normalized.length < 2) return null;
+
+  let bestBearing: number | null = null;
+  let bestLength = 0;
+
+  for (let index = 0; index < normalized.length; index++) {
+    const start = normalized[index];
+    const end = normalized[(index + 1) % normalized.length];
+    const length = haversine(start.lat, start.lng, end.lat, end.lng);
+
+    if (length <= bestLength) continue;
+
+    bestLength = length;
+    bestBearing = bearingTo(start.lat, start.lng, end.lat, end.lng);
+  }
+
+  return bestBearing;
+}
+
+function formatRoofStyleLabel(style: string): string {
+  switch (style) {
+    case "flat":
+      return "Flat roof";
+    case "gabled":
+      return "Gabled roof";
+    case "hipped":
+      return "Hipped roof";
+    case "skillion":
+      return "Skillion roof";
+    default:
+      return `${style.charAt(0).toUpperCase()}${style.slice(1)} roof`;
+  }
+}
+
+function heightSourceLabel(
+  building: DetectedBuilding,
+  fallbackHeightM: number,
+): string {
+  if (building.heightSource === "osm-height") {
+    return "OSM height";
+  }
+
+  if (building.heightSource === "osm-levels") {
+    return building.levels
+      ? `OSM levels (${Math.round(building.levels)} floors)`
+      : "OSM levels";
+  }
+
+  return `Footprint heuristic (${Math.round(fallbackHeightM)}m)`;
+}
+
 function polygonSignedArea(points: LatLng[]): number {
   const normalized = normalizeFootprint(points);
   let area = 0;
@@ -456,13 +933,36 @@ function buildReconstructionPresets(
         )
       : longestEdgeBearingDeg;
 
+  const buildingGridAltitude = Math.round(clamp(estimatedHeightM + 22, 28, 90));
+  const buildingGridSpacingM = Math.round(clamp(footprintSizeM / 7, 10, 18));
+  const facadeDistanceM = Math.round(
+    clamp(Math.max(12, estimatedHeightM * 0.55), 12, 28),
+  );
+  const denseFacadeDistanceM = Math.round(
+    clamp(Math.max(10, estimatedHeightM * 0.42), 10, 20),
+  );
+  const facadeRows = Math.round(clamp(Math.ceil(estimatedHeightM / 6), 4, 8));
+  const denseFacadeRows = Math.round(
+    clamp(Math.ceil(estimatedHeightM / 4.5), 6, 10),
+  );
+  const facadeColumns = Math.round(
+    clamp(selectedSegment ? Math.ceil(selectedSegment.lengthM / 5) : 7, 5, 12),
+  );
+  const denseFacadeColumns = Math.round(
+    clamp(
+      selectedSegment ? Math.ceil(selectedSegment.lengthM / 3.6) : 10,
+      8,
+      16,
+    ),
+  );
+
   return [
     {
       id: "roof-grid",
-      label: "Roof grid",
+      label: "Roof nadir",
       detail: `${Math.round(estimatedHeightM + 28)}m • ${Math.round(clamp(footprintSizeM / 5, 8, 20))}m spacing`,
       description:
-        "Top-down pass aligned to the footprint for roof and nadir coverage.",
+        "Classic nadir roof pass aligned to the footprint for top-down roof coverage.",
       templateType: "grid",
       gridParams: {
         ...DEFAULT_GRID_PARAMS,
@@ -471,10 +971,90 @@ function buildReconstructionPresets(
         altitude: Math.round(clamp(estimatedHeightM + 28, 35, 120)),
         spacingM: Math.round(clamp(footprintSizeM / 5, 8, 20)),
         addPhotos: true,
+        crosshatch: false,
+        gimbalPitchAngle: -90,
         rotationDeg,
         reverse: false,
       },
     },
+    {
+      id: "building-grid-3d",
+      label: "3D building grid",
+      detail: `${buildingGridAltitude}m • ${buildingGridSpacingM}m spacing • cross-grid`,
+      description:
+        "Mission Planner style cross-grid with an oblique camera to keep roof and facades visible in the reconstruction.",
+      templateType: "grid",
+      gridParams: {
+        ...DEFAULT_GRID_PARAMS,
+        ...MISSION_PLANNER_3D_GRID_PARAMS,
+        corner1: [minLat, minLng],
+        corner2: [maxLat, maxLng],
+        altitude: buildingGridAltitude,
+        spacingM: buildingGridSpacingM,
+        rotationDeg,
+        reverse: false,
+      },
+    },
+    ...(selectedSegment
+      ? [
+          {
+            id: "vertical-facade",
+            label: "Vertical facade",
+            detail: `${facadeDistanceM}m standoff • ${facadeRows}x${facadeColumns}`,
+            description:
+              "Mission Planner style vertical facade pass aligned with the detected wall.",
+            templateType: "facade" as const,
+            facadeParams: {
+              ...DEFAULT_FACADE_PARAMS,
+              ...MISSION_PLANNER_VERTICAL_FACADE_PARAMS,
+              point1: [
+                selectedSegment.start.lat,
+                selectedSegment.start.lng,
+              ] as [number, number],
+              point2: [selectedSegment.end.lat, selectedSegment.end.lng] as [
+                number,
+                number,
+              ],
+              distanceM: facadeDistanceM,
+              minAltitude: Math.max(
+                MISSION_PLANNER_VERTICAL_FACADE_PARAMS.minAltitude,
+                6,
+              ),
+              maxAltitude: Math.round(clamp(estimatedHeightM + 8, 20, 90)),
+              numRows: facadeRows,
+              numColumns: facadeColumns,
+            },
+          },
+          {
+            id: "dense-facade",
+            label: "Dense facade",
+            detail: `${denseFacadeDistanceM}m standoff • ${denseFacadeRows}x${denseFacadeColumns}`,
+            description:
+              "Denser facade pass for tighter photogrammetry with more vertical and horizontal samples.",
+            templateType: "facade" as const,
+            facadeParams: {
+              ...DEFAULT_FACADE_PARAMS,
+              ...MISSION_PLANNER_DENSE_FACADE_PARAMS,
+              point1: [
+                selectedSegment.start.lat,
+                selectedSegment.start.lng,
+              ] as [number, number],
+              point2: [selectedSegment.end.lat, selectedSegment.end.lng] as [
+                number,
+                number,
+              ],
+              distanceM: denseFacadeDistanceM,
+              minAltitude: Math.max(
+                MISSION_PLANNER_DENSE_FACADE_PARAMS.minAltitude,
+                6,
+              ),
+              maxAltitude: Math.round(clamp(estimatedHeightM + 12, 24, 100)),
+              numRows: denseFacadeRows,
+              numColumns: denseFacadeColumns,
+            },
+          },
+        ]
+      : []),
     {
       id: "oblique-orbit",
       label: "Oblique orbit",
@@ -647,6 +1227,8 @@ function buildFacadeScenario(
 }
 
 function buildBuildings3DView(args: {
+  templatePreview: TemplateResult | null;
+  activeTemplateType: TemplateMode;
   detectedBuilding: DetectedBuilding | null;
   selectedSegment: FacadeSegmentOption | null;
   facadeParams: FacadeParams | null;
@@ -654,16 +1236,128 @@ function buildBuildings3DView(args: {
     | ReturnType<typeof useMissionStore.getState>["waypoints"][number]
     | null;
   selectedWaypointHeading: number | null;
+  mainMapViewport: MainMapViewport | null;
   defaultMapView: { latitude: number; longitude: number; zoom: number };
 }): Buildings3DView {
   const {
+    templatePreview,
+    activeTemplateType,
     detectedBuilding,
     selectedSegment,
     facadeParams,
     selectedWaypoint,
     selectedWaypointHeading,
+    mainMapViewport,
     defaultMapView,
   } = args;
+
+  if (templatePreview && activeTemplateType) {
+    const templatePoints = [
+      ...templatePreview.waypoints.map((waypoint) => ({
+        lat: waypoint.latitude,
+        lng: waypoint.longitude,
+      })),
+      ...templatePreview.pois.map((poi) => ({
+        lat: poi.latitude,
+        lng: poi.longitude,
+      })),
+    ];
+
+    if (templatePoints.length > 0) {
+      const latitudes = templatePoints.map((point) => point.lat);
+      const longitudes = templatePoints.map((point) => point.lng);
+      const minLat = Math.min(...latitudes);
+      const maxLat = Math.max(...latitudes);
+      const minLng = Math.min(...longitudes);
+      const maxLng = Math.max(...longitudes);
+      const diagonalM = haversine(minLat, minLng, maxLat, maxLng);
+      const maxTemplateAltitude = Math.max(
+        30,
+        ...templatePreview.waypoints.map((waypoint) => waypoint.height),
+      );
+      const heading = selectedSegment
+        ? (bearingTo(
+            selectedSegment.start.lat,
+            selectedSegment.start.lng,
+            selectedSegment.end.lat,
+            selectedSegment.end.lng,
+          ) +
+            90) %
+          360
+        : facadeParams
+          ? (bearingTo(
+              facadeParams.point1[0],
+              facadeParams.point1[1],
+              facadeParams.point2[0],
+              facadeParams.point2[1],
+            ) +
+              90) %
+            360
+          : templatePoints.length >= 2
+            ? bearingTo(
+                templatePoints[0].lat,
+                templatePoints[0].lng,
+                templatePoints[templatePoints.length - 1].lat,
+                templatePoints[templatePoints.length - 1].lng,
+              )
+            : (mainMapViewport?.heading ?? 0);
+      const range = clamp(
+        Math.max(
+          diagonalM * (activeTemplateType === "facade" ? 2.8 : 2.35),
+          activeTemplateType === "facade"
+            ? (selectedSegment?.lengthM ?? 36) * 4.6
+            : 170,
+        ),
+        140,
+        3200,
+      );
+      const subtitle =
+        activeTemplateType === "facade"
+          ? "Focused on the current facade template"
+          : `Focused on the current ${activeTemplateType} template`;
+
+      return {
+        center: {
+          lat: (minLat + maxLat) / 2,
+          lng: (minLng + maxLng) / 2,
+          altitude: Math.max(maxTemplateAltitude * 1.8, range * 0.35),
+        },
+        range,
+        heading,
+        tilt: activeTemplateType === "facade" ? 67.5 : 62.5,
+        title: "Google Buildings 3D",
+        subtitle,
+      };
+    }
+  }
+
+  if (mainMapViewport) {
+    const latitudeFactor = Math.max(
+      0.35,
+      Math.cos(deg2rad(mainMapViewport.center.lat)),
+    );
+    const groundResolutionMPerPixel =
+      (156543.03392 * latitudeFactor) / 2 ** mainMapViewport.zoom;
+    const range = clamp(groundResolutionMPerPixel * 720, 140, 3200);
+    const subtitle = detectedBuilding
+      ? "Synced to the current main map view around the detected building"
+      : selectedWaypoint
+        ? `Synced to the current main map view near ${selectedWaypoint.name}`
+        : "Synced to the current main map view";
+
+    return {
+      center: {
+        lat: mainMapViewport.center.lat,
+        lng: mainMapViewport.center.lng,
+        altitude: Math.max(90, range * 0.35),
+      },
+      range,
+      heading: mainMapViewport.heading,
+      tilt: mainMapViewport.tilt > 0 ? 67.5 : 55,
+      title: "Google Buildings 3D",
+      subtitle,
+    };
+  }
 
   if (detectedBuilding) {
     const center = {
@@ -733,26 +1427,272 @@ function buildBuildings3DView(args: {
   };
 }
 
-function buildApproximateBuildingShell(building: DetectedBuilding | null): {
-  roofCoordinates: google.maps.LatLngAltitudeLiteral[];
-  estimatedHeightM: number;
-  confidencePercent: number;
-} | null {
+async function resolveStreetViewContext(
+  building: DetectedBuilding,
+  selectedSegment: FacadeSegmentOption | null,
+): Promise<StreetViewContext> {
+  if (typeof google === "undefined" || !google.maps?.StreetViewService) {
+    return {
+      status: "unknown",
+      panoramaLocation: null,
+      distanceM: null,
+      headingFromBuildingDeg: null,
+      label: "Street View unavailable in this session",
+    };
+  }
+
+  const targetPoint = selectedSegment
+    ? segmentMidpoint(selectedSegment)
+    : building.centroid;
+
+  return new Promise((resolve) => {
+    const service = new google.maps.StreetViewService();
+    service.getPanorama(
+      {
+        location: targetPoint,
+        radius: clamp(Math.max(30, building.distanceToQueryM + 24), 30, 90),
+      },
+      (result, status) => {
+        if (
+          status !== google.maps.StreetViewStatus.OK ||
+          !result?.location?.latLng
+        ) {
+          resolve({
+            status: "unavailable",
+            panoramaLocation: null,
+            distanceM: null,
+            headingFromBuildingDeg: null,
+            label: "No nearby Street View cue",
+          });
+          return;
+        }
+
+        const panoramaLocation = result.location.latLng.toJSON();
+        const distanceM = haversine(
+          targetPoint.lat,
+          targetPoint.lng,
+          panoramaLocation.lat,
+          panoramaLocation.lng,
+        );
+
+        resolve({
+          status: "available",
+          panoramaLocation,
+          distanceM,
+          headingFromBuildingDeg: bearingTo(
+            building.centroid.lat,
+            building.centroid.lng,
+            panoramaLocation.lat,
+            panoramaLocation.lng,
+          ),
+          label: `Street View cue ${Math.round(distanceM)}m away`,
+        });
+      },
+    );
+  });
+}
+
+function buildApproximateBuildingShell(
+  building: DetectedBuilding | null,
+  selectedSegment: FacadeSegmentOption | null,
+  streetViewContext: StreetViewContext | null,
+): ReconstructedBuildingShell | null {
   if (!building) return null;
 
   const normalizedFootprint = normalizeFootprint(building.footprint);
   if (normalizedFootprint.length < 3) return null;
 
-  const estimatedHeightM = clamp(building.estimatedHeightM ?? 24, 12, 120);
+  const centroid = footprintCentroid(normalizedFootprint);
+  const footprintAreaM2 = footprintAreaMeters(normalizedFootprint);
+  const primaryBearing =
+    (selectedSegment
+      ? bearingTo(
+          selectedSegment.start.lat,
+          selectedSegment.start.lng,
+          selectedSegment.end.lat,
+          selectedSegment.end.lng,
+        )
+      : null) ??
+    longestEdgeBearing(normalizedFootprint) ??
+    0;
+  const primaryLocalPoints = normalizedFootprint.map((point) =>
+    projectOnBearingAxis(toLocalXY(centroid, point), primaryBearing),
+  );
+  const primaryWidth = Math.max(
+    1,
+    ...primaryLocalPoints.map((point) => Math.abs(point.u)),
+  );
+  const primaryDepth = Math.max(
+    1,
+    ...primaryLocalPoints.map((point) => Math.abs(point.v)),
+  );
+  const aspectRatio =
+    Math.max(primaryWidth, primaryDepth) /
+    Math.max(1, Math.min(primaryWidth, primaryDepth));
+  const heuristicHeightM = clamp(
+    12 +
+      Math.sqrt(Math.max(footprintAreaM2, 1)) * 0.32 +
+      (aspectRatio < 1.25 ? 3 : 0),
+    11,
+    48,
+  );
+  const estimatedHeightM = clamp(
+    building.estimatedHeightM ?? heuristicHeightM,
+    12,
+    120,
+  );
+  const explicitRoofShape = building.roofShape?.trim().toLowerCase() ?? null;
 
-  return {
-    roofCoordinates: normalizedFootprint.map((point) => ({
+  let roofStyle = explicitRoofShape;
+  if (
+    roofStyle !== "flat" &&
+    roofStyle !== "gabled" &&
+    roofStyle !== "hipped" &&
+    roofStyle !== "skillion"
+  ) {
+    roofStyle = null;
+  }
+
+  if (!roofStyle) {
+    if (estimatedHeightM < 15 && footprintAreaM2 > 550) {
+      roofStyle = "flat";
+    } else if (aspectRatio > 1.4) {
+      roofStyle = "gabled";
+    } else {
+      roofStyle = "hipped";
+    }
+  }
+
+  const streetViewBearing = streetViewContext?.headingFromBuildingDeg ?? null;
+  const roofBearingDeg =
+    building.roofDirectionDeg ??
+    (aspectRatio < 1.2 && streetViewBearing != null
+      ? (streetViewBearing + 90) % 360
+      : primaryBearing);
+  const projectedPoints = normalizedFootprint.map((point) =>
+    projectOnBearingAxis(toLocalXY(centroid, point), roofBearingDeg),
+  );
+  const minU = Math.min(...projectedPoints.map((point) => point.u));
+  const maxU = Math.max(...projectedPoints.map((point) => point.u));
+  const minV = Math.min(...projectedPoints.map((point) => point.v));
+  const maxV = Math.max(...projectedPoints.map((point) => point.v));
+  const maxAbsU = Math.max(1, Math.abs(minU), Math.abs(maxU));
+  const maxAbsV = Math.max(1, Math.abs(minV), Math.abs(maxV));
+  const roofRiseM =
+    roofStyle === "flat"
+      ? 0
+      : clamp(
+          building.roofHeightM ??
+            estimatedHeightM *
+              (roofStyle === "gabled"
+                ? 0.14
+                : roofStyle === "hipped"
+                  ? 0.11
+                  : 0.1) +
+              (streetViewContext?.status === "available" ? 0.8 : 0),
+          1.8,
+          Math.min(estimatedHeightM * 0.28, 12),
+        );
+  const wallHeightM = clamp(estimatedHeightM - roofRiseM, 8, estimatedHeightM);
+
+  const roofCoordinates = normalizedFootprint.map((point, index) => {
+    const projected = projectedPoints[index];
+    let roofFactor = 0;
+
+    if (roofStyle === "gabled") {
+      roofFactor = 1 - Math.abs(projected.v) / maxAbsV;
+    } else if (roofStyle === "hipped") {
+      roofFactor =
+        1 -
+        Math.max(
+          Math.abs(projected.u) / maxAbsU,
+          Math.abs(projected.v) / maxAbsV,
+        );
+    } else if (roofStyle === "skillion") {
+      roofFactor = (projected.v - minV) / Math.max(1, maxV - minV);
+    }
+
+    return {
       lat: point.lat,
       lng: point.lng,
-      altitude: estimatedHeightM,
-    })),
+      altitude: wallHeightM + roofRiseM * clamp(roofFactor, 0, 1),
+    };
+  });
+
+  const ridgeCoordinates =
+    roofStyle === "flat"
+      ? null
+      : (() => {
+          const ridgeHalfSpan =
+            roofStyle === "hipped" ? (maxU - minU) * 0.2 : (maxU - minU) * 0.45;
+          const ridgeStart = unprojectFromBearingAxis(
+            centroid,
+            roofBearingDeg,
+            clamp(-ridgeHalfSpan, minU, maxU),
+            0,
+          );
+          const ridgeEnd = unprojectFromBearingAxis(
+            centroid,
+            roofBearingDeg,
+            clamp(ridgeHalfSpan, minU, maxU),
+            0,
+          );
+
+          return [ridgeStart, ridgeEnd].map((point) => ({
+            lat: point.lat,
+            lng: point.lng,
+            altitude: estimatedHeightM,
+          }));
+        })();
+
+  const baseConfidence = clamp(building.confidence, 0, 1);
+  const heightConfidence =
+    building.heightSource === "osm-height"
+      ? 0.96
+      : building.heightSource === "osm-levels"
+        ? 0.82
+        : 0.6;
+  const streetViewConfidence =
+    streetViewContext?.status === "available"
+      ? clamp(1 - (streetViewContext.distanceM ?? 75) / 70, 0.35, 1)
+      : streetViewContext?.status === "unknown"
+        ? 0.45
+        : 0.25;
+  const roofConfidence = building.roofShape ? 0.9 : 0.55;
+  const confidencePercent = Math.round(
+    clamp(
+      baseConfidence * 0.55 +
+        heightConfidence * 0.25 +
+        streetViewConfidence * 0.1 +
+        roofConfidence * 0.1,
+      0.42,
+      0.97,
+    ) * 100,
+  );
+  const resolvedHeightSourceLabel = heightSourceLabel(
+    building,
+    heuristicHeightM,
+  );
+  const roofStyleLabel = formatRoofStyleLabel(roofStyle);
+  const streetViewLabel = streetViewContext?.label ?? "Street View cue pending";
+
+  return {
+    roofCoordinates,
+    ridgeCoordinates,
     estimatedHeightM,
-    confidencePercent: Math.round(clamp(building.confidence, 0, 1) * 100),
+    wallHeightM,
+    roofPeakHeightM: estimatedHeightM,
+    confidencePercent,
+    roofStyleLabel,
+    heightSourceLabel: resolvedHeightSourceLabel,
+    streetViewLabel,
+    sourceSummary: [
+      "OSM footprint",
+      resolvedHeightSourceLabel,
+      "Google Buildings 3D context",
+      streetViewLabel,
+    ].join(" • "),
+    note: `Hybrid estimate using OSM footprint, ${resolvedHeightSourceLabel.toLowerCase()}, Google 3D context, and ${streetViewLabel.toLowerCase()}. The ${roofStyleLabel.toLowerCase()} is still heuristic, so the model remains approximate.`,
   };
 }
 
@@ -763,26 +1703,19 @@ function segmentMidpoint(segment: FacadeSegmentOption): LatLng {
   };
 }
 
-function Buildings3DPanel({
-  open,
-  view,
-  detectedBuilding,
-  selectedSegment,
-  facadeRecommendation,
-  onClose,
-}: {
-  open: boolean;
-  view: Buildings3DView;
+function buildBuildings3DMarkers(args: {
   detectedBuilding: DetectedBuilding | null;
   selectedSegment: FacadeSegmentOption | null;
   facadeRecommendation: FacadeCopilotRecommendation | null;
-  onClose: () => void;
-}) {
-  if (!open) return null;
-
+  streetViewContext: StreetViewContext | null;
+}): Buildings3DMarker[] {
+  const {
+    detectedBuilding,
+    selectedSegment,
+    facadeRecommendation,
+    streetViewContext,
+  } = args;
   const markers: Buildings3DMarker[] = [];
-  const approximateBuildingShell =
-    buildApproximateBuildingShell(detectedBuilding);
 
   if (detectedBuilding) {
     markers.push({
@@ -842,8 +1775,71 @@ function Buildings3DPanel({
     );
   }
 
+  if (
+    streetViewContext?.status === "available" &&
+    streetViewContext.panoramaLocation
+  ) {
+    markers.push({
+      id: "street-view-cue",
+      position: streetViewContext.panoramaLocation,
+      glyph: "SV",
+      label: streetViewContext.label,
+      background: "#7c3aed",
+      borderColor: "#c4b5fd",
+      glyphColor: "#f5f3ff",
+      scale: 1.05,
+    });
+  }
+
+  return markers;
+}
+
+function toGroundPolygonCoordinates(
+  footprint: LatLng[],
+): google.maps.LatLngAltitudeLiteral[] {
+  return footprint.map((point) => ({
+    lat: point.lat,
+    lng: point.lng,
+    altitude: 0,
+  }));
+}
+
+function Buildings3DPanel({
+  open,
+  view,
+  markers,
+  rnbBuildings,
+  selectedRnbBuildingId,
+  detectedBuilding: _detectedBuilding,
+  reconstructionShell,
+  contextShells,
+  scanRoute,
+  streetViewContext: _streetViewContext,
+  selectedSegment,
+  facadeRecommendation,
+  onClose,
+}: {
+  open: boolean;
+  view: Buildings3DView;
+  markers: Buildings3DMarker[];
+  rnbBuildings: RnbBuilding[];
+  selectedRnbBuildingId: string | null;
+  detectedBuilding: DetectedBuilding | null;
+  reconstructionShell: ReconstructedBuildingShell | null;
+  contextShells: Array<{ id: string; shell: ReconstructedBuildingShell }>;
+  scanRoute: Buildings3DScanRoute | null;
+  streetViewContext: StreetViewContext | null;
+  selectedSegment: FacadeSegmentOption | null;
+  facadeRecommendation: FacadeCopilotRecommendation | null;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+
+  const approximateBuildingShell = reconstructionShell;
+  const routeWaypointMarkers = scanRoute?.waypointMarkers ?? [];
+
   return (
-    <div className="absolute right-4 top-4 z-20 flex h-[360px] w-[min(520px,calc(100%-2rem))] flex-col overflow-hidden rounded-xl border border-border bg-background/95 shadow-2xl backdrop-blur-sm">
+    <div className="absolute inset-0 z-0 flex flex-col overflow-hidden bg-background">
       <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-cyan-400">
@@ -856,7 +1852,7 @@ function Buildings3DPanel({
           onClick={onClose}
           className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
         >
-          Close
+          2D
         </button>
       </div>
       <div className="relative min-h-0 flex-1 bg-black/30">
@@ -870,6 +1866,58 @@ function Buildings3DPanel({
           gestureHandling={GestureHandling.GREEDY}
           style={{ width: "100%", height: "100%" }}
         >
+          {rnbBuildings.map((building) => {
+            const isSelected = building.rnbId === selectedRnbBuildingId;
+            return (
+              <gmp-polygon-3d
+                key={`rnb-footprint-${building.rnbId}`}
+                altitudeMode={
+                  AltitudeMode.CLAMP_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
+                }
+                outerCoordinates={toGroundPolygonCoordinates(
+                  building.footprint,
+                )}
+                fillColor={
+                  isSelected
+                    ? "rgba(34, 211, 238, 0.28)"
+                    : "rgba(56, 189, 248, 0.14)"
+                }
+                strokeColor={isSelected ? "#22d3ee" : "#0ea5e9"}
+                strokeWidth={isSelected ? 3 : 2}
+                drawsOccludedSegments
+                zIndex={isSelected ? 26 : 14}
+              />
+            );
+          })}
+          {contextShells.map(({ id, shell }) => (
+            <gmp-polygon-3d
+              key={`context-shell-${id}`}
+              altitudeMode={
+                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
+              }
+              outerCoordinates={shell.roofCoordinates}
+              fillColor="rgba(148, 163, 184, 0.16)"
+              strokeColor="#94a3b8"
+              strokeWidth={1}
+              extruded
+              drawsOccludedSegments
+              zIndex={12}
+            />
+          ))}
+          {scanRoute && scanRoute.path.length >= 2 && (
+            <gmp-polyline-3d
+              altitudeMode={
+                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
+              }
+              coordinates={scanRoute.path}
+              strokeColor="#f59e0b"
+              strokeWidth={3}
+              outerColor="#7c2d12"
+              outerWidth={1}
+              drawsOccludedSegments
+              zIndex={18}
+            />
+          )}
           {approximateBuildingShell && (
             <gmp-polygon-3d
               altitudeMode={
@@ -884,6 +1932,35 @@ function Buildings3DPanel({
               zIndex={20}
             />
           )}
+          {approximateBuildingShell?.ridgeCoordinates && (
+            <gmp-polyline-3d
+              altitudeMode={
+                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
+              }
+              coordinates={approximateBuildingShell.ridgeCoordinates}
+              strokeColor="#ccfbf1"
+              strokeWidth={2}
+              outerColor="#134e4a"
+              outerWidth={1}
+              drawsOccludedSegments
+              zIndex={24}
+            />
+          )}
+          {routeWaypointMarkers.map((marker) => (
+            <Marker3D
+              key={marker.id}
+              position={marker.position}
+              altitudeMode={AltitudeMode.RELATIVE_TO_GROUND}
+            >
+              <Pin
+                glyph={marker.glyph}
+                background={marker.background}
+                borderColor={marker.borderColor}
+                glyphColor={marker.glyphColor}
+                scale={marker.scale}
+              />
+            </Marker3D>
+          ))}
           {markers.map((marker) => (
             <Marker3D
               key={marker.id}
@@ -900,14 +1977,33 @@ function Buildings3DPanel({
             </Marker3D>
           ))}
         </Map3D>
-        {markers.length > 0 && (
-          <div className="pointer-events-none absolute bottom-3 left-3 max-w-[250px] rounded-md border border-border/80 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
-            <p className="font-medium text-foreground">3D mission markers</p>
-            {markers.map((marker) => (
-              <p key={marker.id} className="text-muted-foreground">
-                {marker.glyph}: {marker.label}
-              </p>
-            ))}
+        {scanRoute && (
+          <div className="pointer-events-none absolute left-3 bottom-3 max-w-[250px] rounded-md border border-amber-500/30 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
+            <p className="font-medium text-foreground">Scan route in 3D</p>
+            <p className="text-muted-foreground">{scanRoute.title}</p>
+            <p className="text-muted-foreground">
+              {scanRoute.path.length} waypoint
+              {scanRoute.path.length > 1 ? "s" : ""} with the full scan
+              trajectory.
+            </p>
+          </div>
+        )}
+        {rnbBuildings.length === 0 && (
+          <div className="pointer-events-none absolute right-3 top-3 max-w-[260px] rounded-md border border-sky-500/25 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
+            <p className="font-medium text-foreground">Bâtiments 2D</p>
+            <p className="text-muted-foreground">
+              Aucune emprise RNB visible dans cette zone.
+            </p>
+          </div>
+        )}
+        {contextShells.length > 0 && (
+          <div className="pointer-events-none absolute left-3 top-3 max-w-[260px] rounded-md border border-slate-400/30 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
+            <p className="font-medium text-foreground">Fallback OSM massing</p>
+            <p className="text-muted-foreground">
+              {contextShells.length} nearby building
+              {contextShells.length > 1 ? "s" : ""} extruded for areas where
+              Google Buildings 3D is sparse.
+            </p>
           </div>
         )}
         {facadeRecommendation && selectedSegment && (
@@ -922,21 +2018,6 @@ function Buildings3DPanel({
             </p>
             <p className="text-cyan-200">
               Recommended: {facadeRecommendation.recommendedVariantLabel}
-            </p>
-          </div>
-        )}
-        {approximateBuildingShell && (
-          <div className="pointer-events-none absolute top-3 left-3 max-w-[250px] rounded-md border border-emerald-500/25 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
-            <p className="font-medium text-foreground">
-              Approximate 3D building
-            </p>
-            <p className="text-muted-foreground">
-              Extruded footprint at about{" "}
-              {Math.round(approximateBuildingShell.estimatedHeightM)}m.
-            </p>
-            <p className="text-muted-foreground">
-              Footprint confidence: {approximateBuildingShell.confidencePercent}
-              %
             </p>
           </div>
         )}
@@ -1012,6 +2093,36 @@ function FitBoundsOnLoad() {
 
     if (!bounds.isEmpty()) map.fitBounds(bounds, 48);
   }, [map, waypoints, pois, obstacles]);
+
+  return null;
+}
+
+function MainMapViewportSync({
+  onChange,
+}: {
+  onChange: (viewport: MainMapViewport) => void;
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!map) return;
+
+    const publish = () => {
+      const center = map.getCenter();
+      if (!center) return;
+
+      onChange({
+        center: center.toJSON(),
+        zoom: map.getZoom() ?? 15,
+        heading: map.getHeading() ?? 0,
+        tilt: map.getTilt() ?? 0,
+      });
+    };
+
+    publish();
+    const listener = map.addListener("idle", publish);
+    return () => listener.remove();
+  }, [map, onChange]);
 
   return null;
 }
@@ -1154,6 +2265,10 @@ function MapInteraction({
   setFacadeParams,
   setPencilParams,
   setTemplateConfirmed,
+  rnbSelectionEnabled,
+  rnbBuildings,
+  onSelectRnbBuilding,
+  onClearRnbSelection,
 }: {
   targetTilt: number;
   templateMode: TemplateMode;
@@ -1168,6 +2283,13 @@ function MapInteraction({
   setFacadeParams: (value: FacadeParams | null) => void;
   setPencilParams: (value: PencilParams | null) => void;
   setTemplateConfirmed: (value: boolean) => void;
+  rnbSelectionEnabled: boolean;
+  rnbBuildings: RnbBuilding[];
+  onSelectRnbBuilding: (
+    building: RnbBuilding,
+    position: google.maps.LatLngLiteral,
+  ) => void;
+  onClearRnbSelection: () => void;
 }) {
   const map = useMap();
   const isAddingWaypoint = useMissionStore((s) => s.isAddingWaypoint);
@@ -1270,7 +2392,28 @@ function MapInteraction({
           return;
         }
 
-        if (isAddingPoi) addPoi(point[0], point[1]);
+        if (isAddingPoi) {
+          addPoi(point[0], point[1]);
+          return;
+        }
+
+        if (rnbSelectionEnabled) {
+          const selectedBuilding = rnbBuildings.find((building) =>
+            pointInPolygon(
+              point,
+              building.footprint.map((vertex) => [vertex.lat, vertex.lng]),
+            ),
+          );
+
+          if (selectedBuilding) {
+            onSelectRnbBuilding(selectedBuilding, {
+              lat: point[0],
+              lng: point[1],
+            });
+          } else {
+            onClearRnbSelection();
+          }
+        }
       },
     );
 
@@ -1334,6 +2477,10 @@ function MapInteraction({
     addPoi,
     addObstacle,
     setDrawingVertices,
+    rnbSelectionEnabled,
+    rnbBuildings,
+    onSelectRnbBuilding,
+    onClearRnbSelection,
   ]);
 
   useEffect(() => {
@@ -1398,6 +2545,9 @@ export function MapView() {
   const [pencilParams, setPencilParams] = useState<PencilParams | null>(null);
   const [detectedBuilding, setDetectedBuilding] =
     useState<DetectedBuilding | null>(null);
+  const [detectedBuildingCandidates, setDetectedBuildingCandidates] = useState<
+    DetectedBuilding[]
+  >([]);
   const [facadeAssistSeedParams, setFacadeAssistSeedParams] =
     useState<FacadeParams | null>(null);
   const [facadeSegmentOptions, setFacadeSegmentOptions] = useState<
@@ -1422,8 +2572,38 @@ export function MapView() {
     useState<FacadeCopilotRecommendation | null>(null);
   const [facadeRecommendationBusy, setFacadeRecommendationBusy] =
     useState(false);
-  const [showBuildings3D, setShowBuildings3D] = useState(false);
+  const [showRnbLayer, setShowRnbLayer] = useState(true);
+  const [rnbBuildings, setRnbBuildings] = useState<RnbBuilding[]>([]);
+  const [selectedRnbBuilding, setSelectedRnbBuilding] =
+    useState<SelectedRnbBuilding | null>(null);
+  const [selectedBdTopoBuilding, setSelectedBdTopoBuilding] =
+    useState<BdTopoMatchedBuilding | null>(null);
+  const [selectedBdnbBuilding, setSelectedBdnbBuilding] =
+    useState<BdnbBuildingEnrichment | null>(null);
+  const [selectedRnbBuildingLoading, setSelectedRnbBuildingLoading] =
+    useState(false);
+  const [streetViewContext, setStreetViewContext] =
+    useState<StreetViewContext | null>(null);
+  const [mainMapViewport, setMainMapViewport] =
+    useState<MainMapViewport | null>(null);
   const programmaticTemplateModeRef = useRef<TemplateMode>(null);
+  const reconstructionDemoLaunchedRef = useRef(false);
+  const buildingDetectionCacheRef = useRef<BuildingDetectionCacheEntry[]>(
+    loadBuildingDetectionCache(),
+  );
+  const buildings3DFallbackQueryRef = useRef<{
+    lat: number;
+    lng: number;
+    zoom: number;
+  } | null>(null);
+
+  const reconstructionDemoMode = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("demo") === RECONSTRUCTION_DEMO_QUERY
+      ? RECONSTRUCTION_DEMO_QUERY
+      : null;
+  }, []);
 
   const warnings = useMemo(
     () => getObstacleWarnings(waypoints, obstacles),
@@ -1483,9 +2663,29 @@ export function MapView() {
     [detectedBuilding, selectedFacadeSegment],
   );
 
+  const templatePreview = useMemo<TemplateResult | null>(() => {
+    if (orbitParams) return generateOrbit(orbitParams);
+    if (gridParams) return generateGrid(gridParams);
+    if (facadeParams) return generateFacade(facadeParams);
+    if (pencilParams) return generatePencil(pencilParams);
+    return null;
+  }, [orbitParams, gridParams, facadeParams, pencilParams]);
+
+  const activeTemplateType: TemplateMode = orbitParams
+    ? "orbit"
+    : gridParams
+      ? "grid"
+      : facadeParams
+        ? "facade"
+        : pencilParams
+          ? "pencil"
+          : null;
+
   const buildings3DView = useMemo(
     () =>
       buildBuildings3DView({
+        templatePreview,
+        activeTemplateType,
         detectedBuilding,
         selectedSegment: selectedFacadeSegment,
         facadeParams,
@@ -1493,17 +2693,267 @@ export function MapView() {
         selectedWaypointHeading: singleSelectedWaypoint
           ? resolveWaypointHeading(singleSelectedWaypoint, pois)
           : null,
+        mainMapViewport,
         defaultMapView,
       }),
     [
+      activeTemplateType,
       defaultMapView,
       detectedBuilding,
       facadeParams,
+      mainMapViewport,
       pois,
       selectedFacadeSegment,
       singleSelectedWaypoint,
+      templatePreview,
     ],
   );
+
+  const reconstructionShell = useMemo(
+    () =>
+      buildApproximateBuildingShell(
+        detectedBuilding,
+        selectedFacadeSegment,
+        streetViewContext,
+      ),
+    [detectedBuilding, selectedFacadeSegment, streetViewContext],
+  );
+
+  const buildings3DMarkers = useMemo(
+    () =>
+      buildBuildings3DMarkers({
+        detectedBuilding,
+        selectedSegment: selectedFacadeSegment,
+        facadeRecommendation,
+        streetViewContext,
+      }),
+    [
+      detectedBuilding,
+      facadeRecommendation,
+      selectedFacadeSegment,
+      streetViewContext,
+    ],
+  );
+
+  const selectedRnbCentroidPosition = useMemo<LatLng | null>(() => {
+    if (!selectedRnbBuilding) {
+      return null;
+    }
+
+    return (
+      selectedBdTopoBuilding?.centroid ?? selectedRnbBuilding.building.point
+    );
+  }, [selectedBdTopoBuilding, selectedRnbBuilding]);
+
+  const contextShells = useMemo(
+    () =>
+      detectedBuildingCandidates
+        .filter((candidate) => candidate.id !== detectedBuilding?.id)
+        .map((candidate) => ({
+          id: candidate.id,
+          shell: buildApproximateBuildingShell(candidate, null, null),
+        }))
+        .filter(
+          (
+            candidate,
+          ): candidate is { id: string; shell: ReconstructedBuildingShell } =>
+            candidate.shell !== null,
+        ),
+    [detectedBuilding, detectedBuildingCandidates],
+  );
+
+  const scanRoute3D = useMemo<Buildings3DScanRoute | null>(() => {
+    const previewWaypoints = templatePreview?.waypoints ?? [];
+    const routeWaypoints =
+      activeTemplateType && previewWaypoints.length > 0
+        ? previewWaypoints
+        : waypoints;
+
+    if (routeWaypoints.length === 0) return null;
+
+    return {
+      title:
+        activeTemplateType && previewWaypoints.length > 0
+          ? `Current ${activeTemplateType} template`
+          : "Current mission route",
+      path: routeWaypoints.map((waypoint) => ({
+        lat: waypoint.latitude,
+        lng: waypoint.longitude,
+        altitude: Math.max(0, waypoint.height),
+      })),
+      waypointMarkers: routeWaypoints.map((waypoint, index) => ({
+        id: `scan-waypoint-${index + 1}`,
+        position: {
+          lat: waypoint.latitude,
+          lng: waypoint.longitude,
+          altitude: Math.max(0, waypoint.height),
+        },
+        glyph: String(index + 1),
+        label: `Waypoint ${index + 1}`,
+        background: "#f59e0b",
+        borderColor: "#fde68a",
+        glyphColor: "#431407",
+        scale: 0.92,
+      })),
+    };
+  }, [activeTemplateType, templatePreview, waypoints]);
+
+  useEffect(() => {
+    if (!showRnbLayer) {
+      setRnbBuildings([]);
+      setSelectedRnbBuilding(null);
+      setSelectedBdTopoBuilding(null);
+      setSelectedBdnbBuilding(null);
+      setSelectedRnbBuildingLoading(false);
+    }
+  }, [showRnbLayer]);
+
+  useEffect(() => {
+    if (!is3D) {
+      setShowRnbLayer(true);
+    }
+  }, [is3D]);
+
+  useEffect(() => {
+    if (!selectedRnbBuilding) {
+      setSelectedBdTopoBuilding(null);
+      setSelectedBdnbBuilding(null);
+      setSelectedRnbBuildingLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const currentBuilding = selectedRnbBuilding.building;
+    setDetectedBuilding(toDetectedBuildingFromRnb(currentBuilding));
+    setSelectedRnbBuildingLoading(true);
+
+    void (async () => {
+      const [bdTopoResult, bdnbResult] = await Promise.allSettled([
+        buildingApi.matchBdTopoBuilding({
+          rnbId: currentBuilding.rnbId,
+          bdTopoId: currentBuilding.bdTopoId,
+        }),
+        buildingApi.enrichBdnbBuilding({
+          rnbId: currentBuilding.rnbId,
+        }),
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      const bdTopoBuilding =
+        bdTopoResult.status === "fulfilled"
+          ? bdTopoResult.value.building
+          : null;
+      const bdnbBuilding =
+        bdnbResult.status === "fulfilled" ? bdnbResult.value.building : null;
+
+      setSelectedBdTopoBuilding(bdTopoBuilding);
+      setSelectedBdnbBuilding(bdnbBuilding);
+
+      if (bdTopoBuilding) {
+        setDetectedBuilding(
+          toDetectedBuildingFromRnb(currentBuilding, bdTopoBuilding),
+        );
+      }
+
+      setSelectedRnbBuildingLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRnbBuilding]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!detectedBuilding) {
+      setStreetViewContext(null);
+      return;
+    }
+
+    void resolveStreetViewContext(detectedBuilding, selectedFacadeSegment).then(
+      (context) => {
+        if (!cancelled) {
+          setStreetViewContext(context);
+        }
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detectedBuilding, selectedFacadeSegment]);
+
+  useEffect(() => {
+    if (!is3D || !mainMapViewport || detectedBuilding) {
+      return;
+    }
+
+    const lastQuery = buildings3DFallbackQueryRef.current;
+    if (
+      lastQuery &&
+      haversine(
+        lastQuery.lat,
+        lastQuery.lng,
+        mainMapViewport.center.lat,
+        mainMapViewport.center.lng,
+      ) < 45 &&
+      Math.abs(lastQuery.zoom - mainMapViewport.zoom) < 0.35
+    ) {
+      return;
+    }
+
+    buildings3DFallbackQueryRef.current = {
+      lat: mainMapViewport.center.lat,
+      lng: mainMapViewport.center.lng,
+      zoom: mainMapViewport.zoom,
+    };
+
+    let cancelled = false;
+    const queryCenter = {
+      lat: mainMapViewport.center.lat,
+      lng: mainMapViewport.center.lng,
+    };
+    const radiusM = clamp(220 - mainMapViewport.zoom * 8, 70, 180);
+
+    void (async () => {
+      try {
+        const response = await buildingApi.detectNearest({
+          lat: queryCenter.lat,
+          lng: queryCenter.lng,
+          radiusM,
+        });
+
+        rememberBuildingDetection(
+          buildingDetectionCacheRef,
+          queryCenter,
+          radiusM,
+          response,
+        );
+
+        if (!cancelled) {
+          setDetectedBuildingCandidates(response.candidates);
+        }
+      } catch {
+        const cachedResponse = findCachedBuildingDetection(
+          buildingDetectionCacheRef,
+          queryCenter,
+          radiusM,
+        );
+
+        if (!cancelled) {
+          setDetectedBuildingCandidates(cachedResponse?.candidates ?? []);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detectedBuilding, is3D, mainMapViewport]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1528,6 +2978,7 @@ export function MapView() {
     setFacadeParams(null);
     setPencilParams(null);
     setDetectedBuilding(null);
+    setDetectedBuildingCandidates([]);
     setFacadeAssistSeedParams(null);
     setFacadeSegmentOptions([]);
     setSelectedFacadeSegmentId(null);
@@ -1537,6 +2988,7 @@ export function MapView() {
     setFacadeAssistMessage(null);
     setFacadeRecommendation(null);
     setFacadeRecommendationBusy(false);
+    setStreetViewContext(null);
   }, []);
 
   const applyFacadeScenario = useCallback(
@@ -1618,51 +3070,151 @@ export function MapView() {
     [facadeObjective],
   );
 
+  const runFacadeAssistFromParams = useCallback(
+    async (
+      seedParams: FacadeParams,
+      options?: {
+        openBuildings3D?: boolean;
+        messagePrefix?: string;
+        useDemoFallback?: boolean;
+      },
+    ) => {
+      const lat = (seedParams.point1[0] + seedParams.point2[0]) / 2;
+      const lng = (seedParams.point1[1] + seedParams.point2[1]) / 2;
+      const queryCenter = { lat, lng };
+      const radiusM = Math.max(60, seedParams.distanceM * 4);
+
+      setFacadeAssistBusy(true);
+      setFacadeAssistMessage("Searching for the nearest building footprint...");
+
+      try {
+        let response;
+        try {
+          response = await buildingApi.detectNearest({
+            lat,
+            lng,
+            radiusM,
+          });
+
+          rememberBuildingDetection(
+            buildingDetectionCacheRef,
+            queryCenter,
+            radiusM,
+            response,
+          );
+        } catch (error) {
+          const cachedResponse = findCachedBuildingDetection(
+            buildingDetectionCacheRef,
+            queryCenter,
+            radiusM,
+          );
+
+          if (cachedResponse) {
+            response = cachedResponse;
+          } else if (!options?.useDemoFallback) {
+            throw error;
+          } else {
+            response = {
+              building: RECONSTRUCTION_DEMO_BUILDING,
+              candidates: [RECONSTRUCTION_DEMO_BUILDING],
+            };
+          }
+        }
+
+        setDetectedBuildingCandidates(response.candidates);
+        const scenario = applyFacadeScenario(response.building, seedParams);
+        if (!scenario) {
+          throw new Error("Detected building has no usable facade segment");
+        }
+
+        const recommendation = await refreshFacadeRecommendation(
+          response.building,
+          scenario,
+        );
+
+        if (options?.openBuildings3D) {
+          setIs3D(true);
+        }
+
+        const prefix = options?.messagePrefix
+          ? `${options.messagePrefix} `
+          : "";
+        setFacadeAssistMessage(
+          recommendation
+            ? `${prefix}${response.building.source.toUpperCase()} footprint detected. Copilot recommends ${recommendation.recommendedVariantLabel.toLowerCase()} at ${Math.round(recommendation.confidence * 100)}% confidence.`
+            : `${prefix}${response.building.source.toUpperCase()} footprint detected, ${scenario.segments.length} facades ranked, ${scenario.selectedVariant.label.toLowerCase()} variant selected at ${(scenario.selectedVariant.score * 100).toFixed(0)}%.`,
+        );
+
+        return { response, scenario, recommendation };
+      } catch (error) {
+        setDetectedBuilding(null);
+        setDetectedBuildingCandidates([]);
+        setFacadeSegmentOptions([]);
+        setSelectedFacadeSegmentId(null);
+        setFacadeVariantOptions([]);
+        setSelectedFacadeVariantId(null);
+        setFacadeRecommendation(null);
+        setFacadeAssistMessage(
+          error instanceof Error
+            ? error.message
+            : "Failed to auto-fit building",
+        );
+        return null;
+      } finally {
+        setFacadeAssistBusy(false);
+      }
+    },
+    [applyFacadeScenario, refreshFacadeRecommendation],
+  );
+
   const handleFacadeAssist = useCallback(async () => {
     if (!facadeParams) return;
+    await runFacadeAssistFromParams(facadeParams);
+  }, [facadeParams, runFacadeAssistFromParams]);
 
-    const lat = (facadeParams.point1[0] + facadeParams.point2[0]) / 2;
-    const lng = (facadeParams.point1[1] + facadeParams.point2[1]) / 2;
+  const launchReconstructionDemo = useCallback(
+    async (options?: { autoAssist?: boolean; openBuildings3D?: boolean }) => {
+      const seedParams = { ...RECONSTRUCTION_DEMO_PRESET.facadeParams };
 
-    setFacadeAssistBusy(true);
-    setFacadeAssistMessage("Searching for the nearest building footprint...");
-
-    try {
-      const seedParams = { ...facadeParams };
-      const response = await buildingApi.detectNearest({
-        lat,
-        lng,
-        radiusM: Math.max(60, facadeParams.distanceM * 4),
-      });
-      const scenario = applyFacadeScenario(response.building, seedParams);
-      if (!scenario) {
-        throw new Error("Detected building has no usable facade segment");
-      }
-
-      const recommendation = await refreshFacadeRecommendation(
-        response.building,
-        scenario,
-      );
-
-      setFacadeAssistMessage(
-        recommendation
-          ? `${response.building.source.toUpperCase()} footprint detected. Copilot recommends ${recommendation.recommendedVariantLabel.toLowerCase()} at ${Math.round(recommendation.confidence * 100)}% confidence.`
-          : `${response.building.source.toUpperCase()} footprint detected, ${scenario.segments.length} facades ranked, ${scenario.selectedVariant.label.toLowerCase()} variant selected at ${(scenario.selectedVariant.score * 100).toFixed(0)}%.`,
-      );
-    } catch (error) {
+      programmaticTemplateModeRef.current = "facade";
+      setTemplateMode("facade");
+      setDragState(null);
+      setRawPath([]);
+      setOrbitParams(null);
+      setGridParams(null);
+      setPencilParams(null);
+      setTemplateConfirmed(true);
+      setFacadeParams(seedParams);
+      setFacadeAssistSeedParams(seedParams);
       setDetectedBuilding(null);
+      setDetectedBuildingCandidates([]);
       setFacadeSegmentOptions([]);
       setSelectedFacadeSegmentId(null);
       setFacadeVariantOptions([]);
       setSelectedFacadeVariantId(null);
       setFacadeRecommendation(null);
-      setFacadeAssistMessage(
-        error instanceof Error ? error.message : "Failed to auto-fit building",
-      );
-    } finally {
-      setFacadeAssistBusy(false);
-    }
-  }, [applyFacadeScenario, facadeParams]);
+      setFacadeRecommendationBusy(false);
+      setStreetViewContext(null);
+      setFacadeObjective(RECONSTRUCTION_DEMO_PRESET.objective);
+      setSearchValue(RECONSTRUCTION_DEMO_PRESET.searchLabel);
+      setMapTypeId(HYBRID_TYPE);
+
+      if (!options?.autoAssist) {
+        setIs3D(false);
+        setFacadeAssistMessage(
+          "Reconstruction demo loaded. Click Building assist to complete the hybrid 3D preview.",
+        );
+        return;
+      }
+
+      await runFacadeAssistFromParams(seedParams, {
+        openBuildings3D: options.openBuildings3D,
+        messagePrefix: "Demo ready.",
+        useDemoFallback: true,
+      });
+    },
+    [runFacadeAssistFromParams, setTemplateMode],
+  );
 
   useEffect(() => {
     if (programmaticTemplateModeRef.current === templateMode) {
@@ -1671,6 +3223,38 @@ export function MapView() {
     }
     resetTemplateState();
   }, [templateMode, resetTemplateState]);
+
+  useEffect(() => {
+    if (
+      reconstructionDemoMode !== RECONSTRUCTION_DEMO_QUERY ||
+      reconstructionDemoLaunchedRef.current
+    ) {
+      return;
+    }
+
+    reconstructionDemoLaunchedRef.current = true;
+    void launchReconstructionDemo({ autoAssist: true, openBuildings3D: true });
+  }, [launchReconstructionDemo, reconstructionDemoMode]);
+
+  useEffect(() => {
+    if (
+      reconstructionDemoMode !== RECONSTRUCTION_DEMO_QUERY ||
+      !reconstructionDemoLaunchedRef.current ||
+      !mainMapViewport ||
+      !facadeParams ||
+      !templateConfirmed
+    ) {
+      return;
+    }
+
+    setIs3D(true);
+  }, [
+    facadeParams,
+    is3D,
+    mainMapViewport,
+    reconstructionDemoMode,
+    templateConfirmed,
+  ]);
 
   const handleReconstructionPresetSelect = useCallback(
     (presetId: string) => {
@@ -1682,6 +3266,7 @@ export function MapView() {
       setRawPath([]);
       setTemplateConfirmed(true);
       setDetectedBuilding(null);
+      setDetectedBuildingCandidates([]);
       setFacadeAssistSeedParams(null);
       setFacadeSegmentOptions([]);
       setSelectedFacadeSegmentId(null);
@@ -1690,12 +3275,18 @@ export function MapView() {
       setFacadeAssistBusy(false);
       setFacadeRecommendation(null);
       setFacadeRecommendationBusy(false);
+      setStreetViewContext(null);
 
       if (preset.templateType === "grid" && preset.gridParams) {
         setOrbitParams(null);
         setFacadeParams(null);
         setPencilParams(null);
         setGridParams(preset.gridParams);
+      } else if (preset.templateType === "facade" && preset.facadeParams) {
+        setOrbitParams(null);
+        setGridParams(null);
+        setPencilParams(null);
+        setFacadeParams(preset.facadeParams);
       } else if (preset.templateType === "orbit" && preset.orbitParams) {
         setGridParams(null);
         setFacadeParams(null);
@@ -1707,24 +3298,6 @@ export function MapView() {
     },
     [reconstructionPresets, setTemplateMode],
   );
-
-  const templatePreview = useMemo<TemplateResult | null>(() => {
-    if (orbitParams) return generateOrbit(orbitParams);
-    if (gridParams) return generateGrid(gridParams);
-    if (facadeParams) return generateFacade(facadeParams);
-    if (pencilParams) return generatePencil(pencilParams);
-    return null;
-  }, [orbitParams, gridParams, facadeParams, pencilParams]);
-
-  const activeTemplateType: TemplateMode = orbitParams
-    ? "orbit"
-    : gridParams
-      ? "grid"
-      : facadeParams
-        ? "facade"
-        : pencilParams
-          ? "pencil"
-          : null;
 
   if (!googleMapsApiKey) {
     return (
@@ -1760,6 +3333,15 @@ export function MapView() {
           reuseMaps
           style={{ width: "100%", height: "100%" }}
         >
+          <RnbBuildingsLayer
+            enabled={showRnbLayer}
+            buildings={rnbBuildings}
+            selectedBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
+            onBuildingsChange={setRnbBuildings}
+            onSelectBuilding={(building, position) => {
+              setSelectedRnbBuilding({ building, position });
+            }}
+          />
           <MapInteraction
             targetTilt={is3D ? (mapTypeId === HYBRID_TYPE ? 67.5 : 45) : 0}
             templateMode={templateMode}
@@ -1772,7 +3354,14 @@ export function MapView() {
             setFacadeParams={setFacadeParams}
             setPencilParams={setPencilParams}
             setTemplateConfirmed={setTemplateConfirmed}
+            rnbSelectionEnabled={showRnbLayer && !is3D}
+            rnbBuildings={rnbBuildings}
+            onSelectRnbBuilding={(building, position) => {
+              setSelectedRnbBuilding({ building, position });
+            }}
+            onClearRnbSelection={() => setSelectedRnbBuilding(null)}
           />
+          <MainMapViewportSync onChange={setMainMapViewport} />
           <FitBoundsOnLoad />
           <AirspaceLayer />
 
@@ -2160,6 +3749,32 @@ export function MapView() {
               iconPath="arrow"
             />
           ))}
+
+          {showRnbLayer && !is3D && selectedRnbCentroidPosition && (
+            <MarkerOverlay
+              position={selectedRnbCentroidPosition}
+              label="C"
+              title="Centroide batiment"
+              fillColor="#111827"
+              strokeColor="#ffffff"
+              scale={7}
+              zIndex={220}
+            />
+          )}
+
+          {showRnbLayer && !is3D && selectedRnbBuilding && (
+            <InfoWindowOverlay
+              position={selectedRnbBuilding.position}
+              content={buildRnbInfoWindowContent({
+                building: selectedRnbBuilding.building,
+                bdTopoBuilding: selectedBdTopoBuilding,
+                threeDMarkers: buildings3DMarkers,
+                approximateBuildingShell: reconstructionShell,
+                loading: selectedRnbBuildingLoading,
+              })}
+              onClose={() => setSelectedRnbBuilding(null)}
+            />
+          )}
         </Map>
 
         <MapSearch value={searchValue} onValueChange={setSearchValue} />
@@ -2342,18 +3957,13 @@ export function MapView() {
               activeTemplateType === "facade" ? facadeRecommendation : null
             }
             reconstructionInfo={
-              activeTemplateType === "facade" && detectedBuilding
+              activeTemplateType === "facade" && reconstructionShell
                 ? {
-                    estimatedHeightLabel: `${Math.round(
-                      buildApproximateBuildingShell(detectedBuilding)
-                        ?.estimatedHeightM ?? 24,
-                    )}m`,
-                    confidenceLabel: `${Math.round(
-                      clamp(detectedBuilding.confidence, 0, 1) * 100,
-                    )}%`,
-                    note: detectedBuilding.estimatedHeightM
-                      ? "This is a simplified massing generated from the detected footprint and estimated height."
-                      : "This is a simplified massing generated from the detected footprint with heuristic height estimation.",
+                    estimatedHeightLabel: `${Math.round(reconstructionShell.estimatedHeightM)}m`,
+                    confidenceLabel: `${reconstructionShell.confidencePercent}%`,
+                    roofLabel: reconstructionShell.roofStyleLabel,
+                    sourceSummary: reconstructionShell.sourceSummary,
+                    note: reconstructionShell.note,
                   }
                 : null
             }
@@ -2388,12 +3998,22 @@ export function MapView() {
         )}
 
         <Buildings3DPanel
-          open={showBuildings3D}
+          open={is3D}
           view={buildings3DView}
+          markers={buildings3DMarkers}
+          rnbBuildings={showRnbLayer ? rnbBuildings : []}
+          selectedRnbBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
           detectedBuilding={detectedBuilding}
+          reconstructionShell={reconstructionShell}
+          contextShells={contextShells}
+          scanRoute={scanRoute3D}
+          streetViewContext={streetViewContext}
           selectedSegment={selectedFacadeSegment}
           facadeRecommendation={facadeRecommendation}
-          onClose={() => setShowBuildings3D(false)}
+          onClose={() => {
+            setIs3D(false);
+            setShowRnbLayer(true);
+          }}
         />
 
         <div className="absolute bottom-4 left-4 z-10 flex gap-1">
@@ -2412,27 +4032,33 @@ export function MapView() {
           <div className="w-px bg-border mx-1" />
           <button
             className={`px-2 py-1 text-xs rounded ${!is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => setIs3D(false)}
+            onClick={() => {
+              setIs3D(false);
+              setShowRnbLayer(true);
+            }}
           >
             2D
           </button>
           <button
             className={`px-2 py-1 text-xs rounded ${is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => {
-              setIs3D(true);
-              setShowBuildings3D(true);
-            }}
+            onClick={() => setIs3D(true)}
           >
             3D
           </button>
           <div className="w-px bg-border mx-1" />
           <button
-            className={`px-2 py-1 text-xs rounded ${showBuildings3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => setShowBuildings3D((value) => !value)}
+            className={`px-2 py-1 text-xs rounded ${showRnbLayer ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+            onClick={() => setShowRnbLayer((value) => !value)}
           >
-            Buildings 3D
+            Bâtiments 2D
           </button>
         </div>
+
+        {showRnbLayer && !is3D && rnbBuildings.length === 0 && (
+          <div className="absolute bottom-16 left-4 z-10 rounded-md border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-lg">
+            Aucune donnée RNB visible ici. Le référentiel couvre la France.
+          </div>
+        )}
 
         <MapToolbar />
       </div>
