@@ -75,6 +75,31 @@ The self-hosted version is designed as a single-account, personal instance. Miss
 
 By default the map opens centered on Barcelona. Set `DEFAULT_MAP_VIEW` (in your `.env` or `docker-compose.yml`) to make the map open on your local area instead. The format is `lat,lng` or `lat,lng,zoom` — for example `DEFAULT_MAP_VIEW=51.5072,-0.1276,12`. See [.env.example](.env.example) for the accepted ranges.
 
+### Mission assistant AI
+
+The Mission assistant panel now uses a real server-side AI provider instead of the old local heuristic-only POC.
+
+For GitHub Models / Copilot-style usage, configure these variables:
+
+```bash
+AI_PROVIDER=github-models
+GITHUB_MODELS_TOKEN=ghp_xxx_with_models_read
+GITHUB_MODELS_MODEL=openai/gpt-4.1
+```
+
+The token must have `models:read` permission. By default, DroneRoute calls `https://models.github.ai/inference/chat/completions` with the GitHub REST API version `2026-03-10`.
+
+If you prefer another backend, you can also use any OpenAI-compatible chat completion endpoint:
+
+```bash
+AI_PROVIDER=openai-compatible
+AI_API_URL=https://api.openai.com/v1/chat/completions
+AI_API_KEY=sk-...
+AI_MODEL=gpt-4.1-mini
+```
+
+If no provider is configured, the Mission assistant API returns a configuration error instead of silently falling back to the old local POC.
+
 ## Upload to Your DJI Controller
 
 After exporting a KMZ file, push it directly to a USB-connected DJI RC controller:

@@ -9,6 +9,7 @@ import { kmzRoutes } from "./routes/kmz.js";
 import { authRoutes } from "./routes/auth.js";
 import { sharedRoutes } from "./routes/shared.js";
 import { airspaceRoutes } from "./routes/airspace.js";
+import { assistantRoutes } from "./routes/assistant.js";
 import { buildingRoutes } from "./routes/buildings.js";
 import { adminRoutes } from "./routes/admin.js";
 import { preferencesRoutes } from "./routes/preferences.js";
@@ -64,6 +65,7 @@ app.use("/api/kmz", kmzRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/preferences", preferencesRoutes);
 app.use("/api/airspace", airspaceRoutes);
+app.use("/api/assistant", assistantRoutes);
 app.use("/api/buildings", buildingRoutes);
 app.use("/api", sharedRoutes);
 

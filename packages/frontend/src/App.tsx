@@ -34,6 +34,7 @@ import { RoutesPage } from "@/components/routes/RoutesPage";
 import { SharedMissionPage } from "@/components/routes/SharedMissionPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { ElevationGraph } from "@/components/mission/ElevationGraph";
+import { MissionAssistantPanel } from "@/components/mission/MissionAssistantPanel";
 import { WarningsPanel } from "@/components/mission/WarningsPanel";
 import type { Warning } from "@/components/mission/WarningsPanel";
 import { AuthModal } from "@/components/auth/AuthModal";
@@ -49,7 +50,12 @@ import { useAirspaceStore } from "@/store/airspaceStore";
 import { api } from "@/lib/api";
 import { getObstacleWarnings, getAirspaceWarnings } from "@/lib/geo";
 
-type SidebarSection = "waypoints" | "pois" | "obstacles" | "config";
+type SidebarSection =
+  | "waypoints"
+  | "pois"
+  | "obstacles"
+  | "config"
+  | "assistant";
 
 export default function App() {
   const {
@@ -77,6 +83,7 @@ export default function App() {
     pois: false,
     obstacles: false,
     config: false,
+    assistant: false,
   });
 
   const [saving, setSaving] = useState(false);
@@ -632,6 +639,27 @@ export default function App() {
             {expandedSections.config && (
               <div className="max-h-[40vh] overflow-y-auto section-expand">
                 <MissionConfig />
+              </div>
+            )}
+          </div>
+
+          <div className="border-l-2 border-cyan-500/70 bg-cyan-500/[0.03]">
+            <button
+              className="flex items-center gap-2 w-full px-3 py-2 text-xs font-semibold uppercase tracking-wider bg-cyan-500/10 hover:bg-cyan-500/15 text-cyan-300"
+              onClick={() => toggleSection("assistant")}
+              title="Analyse rapide de la mission actuelle"
+            >
+              {expandedSections.assistant ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+              <CircleHelp className="h-3 w-3" />
+              Mission assistant
+            </button>
+            {expandedSections.assistant && (
+              <div className="max-h-[40vh] overflow-y-auto section-expand">
+                <MissionAssistantPanel />
               </div>
             )}
           </div>

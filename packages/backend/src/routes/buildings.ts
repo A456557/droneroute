@@ -14,8 +14,87 @@ interface DetectedBuildingResponse {
   centroid: LatLng;
   confidence: number;
   estimatedHeightM: number | null;
+  heightSource: "osm-height" | "osm-levels" | null;
+  levels: number | null;
+  roofShape: string | null;
+  roofDirectionDeg: number | null;
+  roofHeightM: number | null;
   source: string;
   distanceToQueryM: number;
+}
+
+interface RnbApiBuilding {
+  rnb_id: string;
+  status?: string;
+  point?: {
+    type?: string;
+    coordinates?: number[];
+  };
+  shape?: {
+    type?: string;
+    coordinates?: unknown;
+  };
+  ext_ids?: Array<{
+    id?: string;
+    source?: string;
+    created_at?: string;
+    source_version?: string;
+  }>;
+  is_active?: boolean;
+  addresses?: unknown[];
+}
+
+interface RnbBuildingResponse {
+  rnbId: string;
+  status: string | null;
+  point: LatLng;
+  footprint: LatLng[];
+  extIds: Array<{
+    id: string;
+    source: string;
+    createdAt: string | null;
+    sourceVersion: string | null;
+  }>;
+  bdTopoId: string | null;
+  isActive: boolean;
+  addressCount: number;
+}
+
+interface BdTopoFeatureResponse {
+  type?: string;
+  features?: Array<{
+    geometry?: {
+      type?: string;
+      coordinates?: unknown;
+    };
+    properties?: Record<string, unknown>;
+  }>;
+}
+
+interface BdTopoMatchedBuildingResponse {
+  cleabs: string;
+  nature: string | null;
+  usage1: string | null;
+  usage2: string | null;
+  heightM: number | null;
+  floorCount: number | null;
+  status: string | null;
+  origin: string | null;
+  sourceMethodPlanimetric: string | null;
+  sourceMethodAltimetric: string | null;
+  rnbIds: string | null;
+  centroid: LatLng;
+  footprint: LatLng[];
+}
+
+interface BdnbBuildingEnrichmentResponse {
+  batimentGroupeId: string | null;
+  constructionYear: number | null;
+  wallMaterial: string | null;
+  clayRisk: string | null;
+  heatingType: string | null;
+  dpeClass: string | null;
+  gesClass: string | null;
 }
 
 type FacadeCopilotObjective =
@@ -101,21 +180,260 @@ function polygonCentroid(points: LatLng[]): LatLng {
   };
 }
 
-function parseHeight(tags: Record<string, string> | undefined): number | null {
-  if (!tags) return null;
-  if (tags.height) {
-    const parsed = Number.parseFloat(tags.height.replace("m", "").trim());
-    if (Number.isFinite(parsed)) return parsed;
+function parseOptionalNumber(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number.parseFloat(value.replace("m", "").trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseUnknownNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
   }
-  if (tags["building:levels"]) {
-    const levels = Number.parseFloat(tags["building:levels"]);
-    if (Number.isFinite(levels)) return levels * 3;
+
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
+
   return null;
+}
+
+function parseUnknownString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function extractFootprintFromGeoJsonShape(shape: unknown): LatLng[] {
+  if (!shape || typeof shape !== "object") return [];
+
+  const geometry = shape as { type?: string; coordinates?: unknown };
+  const type = geometry.type;
+  const coordinates = geometry.coordinates;
+
+  const toPath = (ring: unknown): LatLng[] =>
+    Array.isArray(ring)
+      ? ring
+          .map((point) => {
+            if (!Array.isArray(point) || point.length < 2) return null;
+            const lng = parseUnknownNumber(point[0]);
+            const lat = parseUnknownNumber(point[1]);
+            return lat !== null && lng !== null ? { lat, lng } : null;
+          })
+          .filter((point): point is LatLng => point !== null)
+      : [];
+
+  if (
+    type === "Polygon" &&
+    Array.isArray(coordinates) &&
+    coordinates.length > 0
+  ) {
+    return toPath(coordinates[0]);
+  }
+
+  if (
+    type === "MultiPolygon" &&
+    Array.isArray(coordinates) &&
+    coordinates.length > 0 &&
+    Array.isArray(coordinates[0]) &&
+    coordinates[0].length > 0
+  ) {
+    return toPath(coordinates[0][0]);
+  }
+
+  return [];
+}
+
+function normalizeClosedFootprint(path: LatLng[]): LatLng[] {
+  if (path.length < 3) return [];
+
+  const first = path[0];
+  const last = path[path.length - 1];
+  if (first.lat === last.lat && first.lng === last.lng) {
+    return path;
+  }
+
+  return [...path, first];
+}
+
+function escapeCqlLiteral(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function parseHeight(tags: Record<string, string> | undefined): {
+  estimatedHeightM: number | null;
+  heightSource: "osm-height" | "osm-levels" | null;
+  levels: number | null;
+  roofHeightM: number | null;
+  roofShape: string | null;
+  roofDirectionDeg: number | null;
+} {
+  if (!tags) {
+    return {
+      estimatedHeightM: null,
+      heightSource: null,
+      levels: null,
+      roofHeightM: null,
+      roofShape: null,
+      roofDirectionDeg: null,
+    };
+  }
+
+  const explicitHeight = parseOptionalNumber(tags.height);
+  const levels = parseOptionalNumber(tags["building:levels"]);
+  const roofHeightM = parseOptionalNumber(tags["roof:height"]);
+  const roofDirectionDeg = parseOptionalNumber(tags["roof:direction"]);
+  const roofShape = tags["roof:shape"]?.trim().toLowerCase() || null;
+
+  if (explicitHeight != null) {
+    return {
+      estimatedHeightM: explicitHeight,
+      heightSource: "osm-height",
+      levels,
+      roofHeightM,
+      roofShape,
+      roofDirectionDeg,
+    };
+  }
+
+  if (levels != null) {
+    return {
+      estimatedHeightM: levels * 3,
+      heightSource: "osm-levels",
+      levels,
+      roofHeightM,
+      roofShape,
+      roofDirectionDeg,
+    };
+  }
+
+  return {
+    estimatedHeightM: null,
+    heightSource: null,
+    levels,
+    roofHeightM,
+    roofShape,
+    roofDirectionDeg,
+  };
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeRnbBuilding(
+  building: RnbApiBuilding,
+): RnbBuildingResponse | null {
+  if (typeof building.rnb_id !== "string") {
+    return null;
+  }
+
+  const pointCoordinates = Array.isArray(building.point?.coordinates)
+    ? building.point?.coordinates
+    : [];
+  const lng = parseUnknownNumber(pointCoordinates[0]);
+  const lat = parseUnknownNumber(pointCoordinates[1]);
+  const footprint = normalizeClosedFootprint(
+    extractFootprintFromGeoJsonShape(building.shape),
+  );
+
+  if (lat === null || lng === null || footprint.length < 4) {
+    return null;
+  }
+
+  const extIds = Array.isArray(building.ext_ids)
+    ? building.ext_ids
+        .map((extId) => {
+          const id = typeof extId?.id === "string" ? extId.id : null;
+          const source =
+            typeof extId?.source === "string" ? extId.source : null;
+          if (!id || !source) return null;
+
+          return {
+            id,
+            source,
+            createdAt:
+              typeof extId.created_at === "string" ? extId.created_at : null,
+            sourceVersion:
+              typeof extId.source_version === "string"
+                ? extId.source_version
+                : null,
+          };
+        })
+        .filter(
+          (
+            extId,
+          ): extId is {
+            id: string;
+            source: string;
+            createdAt: string | null;
+            sourceVersion: string | null;
+          } => extId !== null,
+        )
+    : [];
+
+  return {
+    rnbId: building.rnb_id,
+    status: typeof building.status === "string" ? building.status : null,
+    point: { lat, lng },
+    footprint,
+    extIds,
+    bdTopoId:
+      extIds.find((extId) => extId.source.toLowerCase() === "bdtopo")?.id ??
+      null,
+    isActive: building.is_active !== false,
+    addressCount: Array.isArray(building.addresses)
+      ? building.addresses.length
+      : 0,
+  };
+}
+
+function normalizeBdTopoFeature(
+  feature: NonNullable<BdTopoFeatureResponse["features"]>[number] | undefined,
+): BdTopoMatchedBuildingResponse | null {
+  const properties = feature?.properties ?? {};
+  const footprint = normalizeClosedFootprint(
+    extractFootprintFromGeoJsonShape(feature?.geometry),
+  );
+
+  if (footprint.length < 4) {
+    return null;
+  }
+
+  return {
+    cleabs: typeof properties.cleabs === "string" ? properties.cleabs : "",
+    nature: typeof properties.nature === "string" ? properties.nature : null,
+    usage1: typeof properties.usage_1 === "string" ? properties.usage_1 : null,
+    usage2: typeof properties.usage_2 === "string" ? properties.usage_2 : null,
+    heightM: parseUnknownNumber(properties.hauteur),
+    floorCount: parseUnknownNumber(properties.nombre_d_etages),
+    status:
+      typeof properties.etat_de_l_objet === "string"
+        ? properties.etat_de_l_objet
+        : null,
+    origin:
+      typeof properties.origine_du_batiment === "string"
+        ? properties.origine_du_batiment
+        : null,
+    sourceMethodPlanimetric:
+      typeof properties.methode_d_acquisition_planimetrique === "string"
+        ? properties.methode_d_acquisition_planimetrique
+        : null,
+    sourceMethodAltimetric:
+      typeof properties.methode_d_acquisition_altimetrique === "string"
+        ? properties.methode_d_acquisition_altimetrique
+        : null,
+    rnbIds:
+      typeof properties.identifiants_rnb === "string"
+        ? properties.identifiants_rnb
+        : null,
+    centroid: polygonCentroid(footprint),
+    footprint,
+  };
 }
 
 function normalizeObjective(value: unknown): FacadeCopilotObjective {
@@ -301,6 +619,7 @@ out tags geom;
 
   return elements
     .map((element): DetectedBuildingResponse | null => {
+      const height = parseHeight(element.tags);
       const geometry = Array.isArray(element.geometry)
         ? element.geometry
             .map((point) => ({ lat: point.lat, lng: point.lon }))
@@ -325,7 +644,12 @@ out tags geom;
         footprint,
         centroid,
         confidence: element.tags?.building ? 0.95 : 0.8,
-        estimatedHeightM: parseHeight(element.tags),
+        estimatedHeightM: height.estimatedHeightM,
+        heightSource: height.heightSource,
+        levels: height.levels,
+        roofShape: height.roofShape,
+        roofDirectionDeg: height.roofDirectionDeg,
+        roofHeightM: height.roofHeightM,
         source: element.tags?.building ? "osm" : "osm-building-part",
         distanceToQueryM: haversineMeters({ lat, lng }, centroid),
       };
@@ -336,7 +660,210 @@ out tags geom;
     .sort((a, b) => a.distanceToQueryM - b.distanceToQueryM);
 }
 
+async function fetchRnbBuildingsForBbox(
+  west: number,
+  south: number,
+  east: number,
+  north: number,
+): Promise<RnbBuildingResponse[]> {
+  const url = new URL("https://rnb-api.beta.gouv.fr/api/alpha/buildings");
+  url.searchParams.set("bbox", `${west},${south},${east},${north}`);
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(`RNB request failed with status ${response.status}`);
+  }
+
+  const payload = (await response.json()) as { results?: RnbApiBuilding[] };
+  const results = Array.isArray(payload.results) ? payload.results : [];
+
+  return results
+    .map(normalizeRnbBuilding)
+    .filter((building): building is RnbBuildingResponse => building !== null);
+}
+
+async function fetchBdTopoBuildingMatch(args: {
+  rnbId?: string;
+  bdTopoId?: string;
+}): Promise<BdTopoMatchedBuildingResponse | null> {
+  const filter = args.bdTopoId
+    ? `cleabs='${escapeCqlLiteral(args.bdTopoId)}'`
+    : args.rnbId
+      ? `identifiants_rnb LIKE '${escapeCqlLiteral(args.rnbId)}'`
+      : null;
+
+  if (!filter) {
+    return null;
+  }
+
+  const url = new URL("https://data.geopf.fr/wfs/ows");
+  url.searchParams.set("service", "WFS");
+  url.searchParams.set("version", "2.0.0");
+  url.searchParams.set("request", "GetFeature");
+  url.searchParams.set("typeNames", "BDTOPO_V3:batiment");
+  url.searchParams.set("outputFormat", "application/json");
+  url.searchParams.set("count", "1");
+  url.searchParams.set("CQL_FILTER", filter);
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(`BD TOPO request failed with status ${response.status}`);
+  }
+
+  const payload = (await response.json()) as BdTopoFeatureResponse;
+  const feature = Array.isArray(payload.features)
+    ? payload.features[0]
+    : undefined;
+  return normalizeBdTopoFeature(feature);
+}
+
+async function fetchBdnbRows(
+  table: string,
+  params: Record<string, string>,
+): Promise<Record<string, unknown>[]> {
+  const url = new URL(`https://api.bdnb.io/v1/bdnb/donnees/${table}`);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(
+      `BDNB request failed for ${table} with status ${response.status}`,
+    );
+  }
+
+  const payload = (await response.json()) as unknown;
+  return Array.isArray(payload)
+    ? payload.filter(
+        (row): row is Record<string, unknown> =>
+          row !== null && typeof row === "object",
+      )
+    : [];
+}
+
+async function fetchBdnbBuildingEnrichment(
+  rnbId: string,
+): Promise<BdnbBuildingEnrichmentResponse | null> {
+  const constructionLookup = await fetchBdnbRows("batiment_construction", {
+    select: "batiment_groupe_id",
+    limit: "1",
+    rnb_id: `eq.${rnbId}`,
+  });
+
+  const batimentGroupeId = parseUnknownString(
+    constructionLookup[0]?.batiment_groupe_id,
+  );
+  if (!batimentGroupeId) {
+    return null;
+  }
+
+  const [ffoRows, argilesRows, dpeRows] = await Promise.all([
+    fetchBdnbRows("batiment_groupe_ffo_bat", {
+      limit: "1",
+      batiment_groupe_id: `eq.${batimentGroupeId}`,
+    }),
+    fetchBdnbRows("batiment_groupe_argiles", {
+      limit: "1",
+      batiment_groupe_id: `eq.${batimentGroupeId}`,
+    }),
+    fetchBdnbRows("rel_batiment_groupe_dpe_logement_complet", {
+      limit: "1",
+      batiment_groupe_id: `eq.${batimentGroupeId}`,
+    }),
+  ]);
+
+  const ffo = ffoRows[0] ?? {};
+  const argiles = argilesRows[0] ?? {};
+  const dpe = dpeRows[0] ?? {};
+
+  return {
+    batimentGroupeId,
+    constructionYear: parseUnknownNumber(ffo.annee_construction),
+    wallMaterial: parseUnknownString(ffo.mat_mur_txt),
+    clayRisk: parseUnknownString(argiles.alea),
+    heatingType: parseUnknownString(dpe.type_generateur_chauffage),
+    dpeClass: parseUnknownString(dpe.classe_bilan_dpe),
+    gesClass: parseUnknownString(dpe.classe_emission_ges),
+  };
+}
+
 export const buildingRoutes = Router();
+
+buildingRoutes.get("/rnb", async (req, res) => {
+  const bbox = typeof req.query.bbox === "string" ? req.query.bbox : null;
+  if (!bbox) {
+    res.status(400).json({ error: "bbox query parameter is required" });
+    return;
+  }
+
+  const parts = bbox.split(",").map((value) => Number.parseFloat(value));
+  if (parts.length !== 4 || !parts.every((value) => Number.isFinite(value))) {
+    res.status(400).json({ error: "bbox must be west,south,east,north" });
+    return;
+  }
+
+  const [west, south, east, north] = parts;
+  if (west >= east || south >= north) {
+    res.status(400).json({ error: "bbox bounds are invalid" });
+    return;
+  }
+
+  try {
+    const buildings = await fetchRnbBuildingsForBbox(west, south, east, north);
+    res.json({ buildings: buildings.slice(0, 120) });
+  } catch (error) {
+    console.error("RNB layer error:", error);
+    res.status(502).json({ error: "Failed to load RNB buildings" });
+  }
+});
+
+buildingRoutes.post("/bdtopo-match", async (req, res) => {
+  const { rnbId, bdTopoId } = (req.body ?? {}) as {
+    rnbId?: unknown;
+    bdTopoId?: unknown;
+  };
+
+  const normalizedRnbId = typeof rnbId === "string" ? rnbId : undefined;
+  const normalizedBdTopoId =
+    typeof bdTopoId === "string" ? bdTopoId : undefined;
+
+  if (!normalizedRnbId && !normalizedBdTopoId) {
+    res.status(400).json({ error: "rnbId or bdTopoId is required" });
+    return;
+  }
+
+  try {
+    const building = await fetchBdTopoBuildingMatch({
+      rnbId: normalizedRnbId,
+      bdTopoId: normalizedBdTopoId,
+    });
+    res.json({ building });
+  } catch (error) {
+    console.error("BD TOPO match error:", error);
+    res.status(502).json({ error: "Failed to query BD TOPO" });
+  }
+});
+
+buildingRoutes.post("/bdnb-enrich", async (req, res) => {
+  const { rnbId } = (req.body ?? {}) as {
+    rnbId?: unknown;
+  };
+
+  const normalizedRnbId = typeof rnbId === "string" ? rnbId : undefined;
+  if (!normalizedRnbId) {
+    res.status(400).json({ error: "rnbId is required" });
+    return;
+  }
+
+  try {
+    const building = await fetchBdnbBuildingEnrichment(normalizedRnbId);
+    res.json({ building });
+  } catch (error) {
+    console.error("BDNB enrich error:", error);
+    res.status(502).json({ error: "Failed to query BDNB" });
+  }
+});
 
 buildingRoutes.post("/detect", async (req, res) => {
   const { lat, lng, radiusM } = req.body ?? {};

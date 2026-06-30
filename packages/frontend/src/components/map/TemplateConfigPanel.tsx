@@ -35,6 +35,11 @@ import type {
   FacadeParams,
   PencilParams,
 } from "@/lib/templates";
+import {
+  MISSION_PLANNER_DENSE_FACADE_PARAMS,
+  MISSION_PLANNER_3D_GRID_PARAMS,
+  MISSION_PLANNER_VERTICAL_FACADE_PARAMS,
+} from "@/lib/templates";
 import type { PointOfInterest } from "@droneroute/shared";
 
 interface TemplateConfigPanelProps {
@@ -62,6 +67,8 @@ interface TemplateConfigPanelProps {
   reconstructionInfo?: {
     estimatedHeightLabel: string;
     confidenceLabel: string;
+    roofLabel: string;
+    sourceSummary: string;
     note: string;
   } | null;
   reconstructionPresets?: Array<{
@@ -272,6 +279,78 @@ export function TemplateConfigPanel({
       {/* Grid params */}
       {type === "grid" && gridParams && onGridChange && (
         <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="col-span-2 space-y-1 rounded-md border border-cyan-500/25 bg-cyan-500/5 p-2">
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-foreground">Usage</p>
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[11px]"
+                  onClick={() =>
+                    onGridChange({
+                      ...gridParams,
+                      addPhotos: true,
+                      crosshatch: false,
+                      gimbalPitchAngle: -90,
+                    })
+                  }
+                >
+                  Toit nadir
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[11px]"
+                  onClick={() =>
+                    onGridChange({
+                      ...gridParams,
+                      ...MISSION_PLANNER_3D_GRID_PARAMS,
+                    })
+                  }
+                >
+                  Bâtiment 3D
+                </Button>
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-[10px] font-medium text-foreground">
+                  Mission Planner preset
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  Cartographie 3D bâtiments: grille oblique en cross-grid pour
+                  mieux voir les façades.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-[11px]"
+                onClick={() =>
+                  onGridChange({
+                    ...gridParams,
+                    ...MISSION_PLANNER_3D_GRID_PARAMS,
+                  })
+                }
+              >
+                Appliquer
+              </Button>
+            </div>
+            <div className="rounded-md border border-border/60 bg-background/50 p-2 text-[10px] text-muted-foreground">
+              <p>
+                Nadir classique: toit, terrain plat, couverture rapide avec
+                caméra à -90° et sans cross-grid.
+              </p>
+              <p className="mt-1">
+                Cross-grid oblique: bâtiments et reconstruction 3D, avec caméra
+                autour de -45° pour mieux voir les façades.
+              </p>
+            </div>
+          </div>
           <div>
             <Label className="text-[10px]">
               Altitude ({heightLabel(unitSystem)})
@@ -309,6 +388,20 @@ export function TemplateConfigPanel({
             />
           </div>
           <div>
+            <Label className="text-[10px]">Gimbal pitch (°)</Label>
+            <NumericInput
+              value={gridParams.gimbalPitchAngle}
+              onChange={(v) =>
+                onGridChange({ ...gridParams, gimbalPitchAngle: v })
+              }
+              min={-90}
+              max={0}
+              step={5}
+              fallback={-90}
+              className="h-7 text-xs"
+            />
+          </div>
+          <div>
             <Label className="text-[10px]">Rotation (°)</Label>
             <NumericInput
               value={gridParams.rotationDeg}
@@ -320,7 +413,7 @@ export function TemplateConfigPanel({
               className="h-7 text-xs"
             />
           </div>
-          <div className="flex items-end gap-2 pb-1">
+          <div className="col-span-2 flex flex-wrap items-end gap-3 pb-1">
             <label className="flex items-center gap-1.5 text-xs cursor-pointer">
               <input
                 type="checkbox"
@@ -331,6 +424,20 @@ export function TemplateConfigPanel({
                 className="rounded"
               />
               Photos
+            </label>
+            <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={gridParams.crosshatch}
+                onChange={(e) =>
+                  onGridChange({
+                    ...gridParams,
+                    crosshatch: e.target.checked,
+                  })
+                }
+                className="rounded"
+              />
+              Cross-grid
             </label>
             <label className="flex items-center gap-1.5 text-xs cursor-pointer">
               <input
@@ -350,6 +457,70 @@ export function TemplateConfigPanel({
       {/* Facade params */}
       {type === "facade" && facadeParams && onFacadeChange && (
         <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="col-span-2 space-y-1 rounded-md border border-cyan-500/25 bg-cyan-500/5 p-2">
+            <div className="space-y-1">
+              <p className="text-[10px] font-medium text-foreground">Usage</p>
+              <div className="flex flex-wrap gap-1.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[11px]"
+                  onClick={() =>
+                    onFacadeChange({
+                      ...facadeParams,
+                      ...MISSION_PLANNER_VERTICAL_FACADE_PARAMS,
+                    })
+                  }
+                >
+                  Façade
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[11px]"
+                  onClick={() =>
+                    onFacadeChange({
+                      ...facadeParams,
+                      ...MISSION_PLANNER_DENSE_FACADE_PARAMS,
+                    })
+                  }
+                >
+                  Façade dense
+                </Button>
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-[10px] font-medium text-foreground">
+                  Mission Planner preset
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  Façade verticale: passage parallèle au mur avec couverture
+                  verticale plus régulière.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-[11px]"
+                onClick={() =>
+                  onFacadeChange({
+                    ...facadeParams,
+                    ...MISSION_PLANNER_VERTICAL_FACADE_PARAMS,
+                  })
+                }
+              >
+                Appliquer
+              </Button>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              Façade dense: plus près du mur et plus de lignes/colonnes pour une
+              photogrammétrie plus serrée.
+            </p>
+          </div>
           <div>
             <Label className="text-[10px]">
               Distance from wall ({distanceLabel(unitSystem)})
@@ -560,11 +731,17 @@ export function TemplateConfigPanel({
               {reconstructionInfo && (
                 <div className="space-y-1 rounded-md border border-emerald-500/25 bg-emerald-500/5 p-2">
                   <p className="text-[10px] font-medium text-foreground">
-                    Approximate 3D massing
+                    Hybrid 3D massing
                   </p>
                   <p className="text-[10px] text-muted-foreground">
                     Height: {reconstructionInfo.estimatedHeightLabel} •
                     Footprint confidence: {reconstructionInfo.confidenceLabel}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Roof: {reconstructionInfo.roofLabel}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {reconstructionInfo.sourceSummary}
                   </p>
                   <p className="text-[10px] text-muted-foreground">
                     {reconstructionInfo.note}

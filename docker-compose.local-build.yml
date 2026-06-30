@@ -35,6 +35,14 @@ services:
       - SELF_HOSTED=${SELF_HOSTED:-true}
       - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY:-}
       - VITE_GOOGLE_MAPS_API_KEY=${VITE_GOOGLE_MAPS_API_KEY:-}
+      - AI_PROVIDER=${AI_PROVIDER:-}
+      - GITHUB_MODELS_TOKEN=${GITHUB_MODELS_TOKEN:-}
+      - GITHUB_MODELS_MODEL=${GITHUB_MODELS_MODEL:-}
+      - GITHUB_MODELS_ENDPOINT=${GITHUB_MODELS_ENDPOINT:-}
+      - GITHUB_MODELS_API_VERSION=${GITHUB_MODELS_API_VERSION:-}
+      - AI_API_URL=${AI_API_URL:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-}
       - DEFAULT_MAP_VIEW=${DEFAULT_MAP_VIEW:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       # Default map view on load (optional). Format: "lat,lng" or "lat,lng,zoom".

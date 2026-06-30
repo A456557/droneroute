@@ -89,6 +89,8 @@ export interface GridParams {
   altitude: number;
   spacingM: number;
   addPhotos: boolean;
+  crosshatch: boolean;
+  gimbalPitchAngle: number;
   rotationDeg: number; // rotation of the grid in degrees (0-360)
   reverse: boolean; // fly the grid in reverse order
 }
@@ -138,8 +140,20 @@ export const DEFAULT_GRID_PARAMS: Omit<GridParams, "corner1" | "corner2"> = {
   altitude: 80,
   spacingM: 30,
   addPhotos: true,
+  crosshatch: false,
+  gimbalPitchAngle: -90,
   rotationDeg: 0,
   reverse: false,
+};
+
+export const MISSION_PLANNER_3D_GRID_PARAMS: Pick<
+  GridParams,
+  "spacingM" | "addPhotos" | "crosshatch" | "gimbalPitchAngle"
+> = {
+  spacingM: 14,
+  addPhotos: true,
+  crosshatch: true,
+  gimbalPitchAngle: -45,
 };
 
 export const DEFAULT_FACADE_PARAMS: Omit<FacadeParams, "point1" | "point2"> = {
@@ -148,6 +162,40 @@ export const DEFAULT_FACADE_PARAMS: Omit<FacadeParams, "point1" | "point2"> = {
   maxAltitude: 30,
   numRows: 4,
   numColumns: 8,
+  addPhotos: true,
+};
+
+export const MISSION_PLANNER_VERTICAL_FACADE_PARAMS: Pick<
+  FacadeParams,
+  | "distanceM"
+  | "minAltitude"
+  | "maxAltitude"
+  | "numRows"
+  | "numColumns"
+  | "addPhotos"
+> = {
+  distanceM: 18,
+  minAltitude: 8,
+  maxAltitude: 36,
+  numRows: 5,
+  numColumns: 7,
+  addPhotos: true,
+};
+
+export const MISSION_PLANNER_DENSE_FACADE_PARAMS: Pick<
+  FacadeParams,
+  | "distanceM"
+  | "minAltitude"
+  | "maxAltitude"
+  | "numRows"
+  | "numColumns"
+  | "addPhotos"
+> = {
+  distanceM: 12,
+  minAltitude: 8,
+  maxAltitude: 42,
+  numRows: 7,
+  numColumns: 11,
   addPhotos: true,
 };
 
@@ -220,6 +268,8 @@ export function generateGrid(params: GridParams): TemplateResult {
     altitude,
     spacingM,
     addPhotos,
+    crosshatch,
+    gimbalPitchAngle,
     rotationDeg,
     reverse,
   } = params;
@@ -241,13 +291,6 @@ export function generateGrid(params: GridParams): TemplateResult {
   // Calculate the width and height of the area in meters
   const widthM = haversine(minLat, minLng, minLat, maxLng);
   const heightM = haversine(minLat, minLng, maxLat, minLng);
-
-  // Determine if we fly N-S or E-W (fly along the longer axis)
-  const flyEW = widthM >= heightM;
-
-  // Number of passes
-  const crossAxisDist = flyEW ? heightM : widthM;
-  const numPasses = Math.max(2, Math.ceil(crossAxisDist / spacingM) + 1);
 
   const takePhotoAction: WaypointAction = {
     actionId: 0,
@@ -274,60 +317,69 @@ export function generateGrid(params: GridParams): TemplateResult {
     return [centerLat + rLat, centerLng + rLng / cosCenter];
   }
 
-  for (let pass = 0; pass < numPasses; pass++) {
-    const fraction = numPasses <= 1 ? 0 : pass / (numPasses - 1);
-    const reverse = pass % 2 === 1; // lawn-mower pattern: alternate direction
+  function appendGridPasses(flyEW: boolean) {
+    const crossAxisDist = flyEW ? heightM : widthM;
+    const numPasses = Math.max(2, Math.ceil(crossAxisDist / spacingM) + 1);
 
-    let wpLat1: number, wpLng1: number, wpLat2: number, wpLng2: number;
+    for (let pass = 0; pass < numPasses; pass++) {
+      const fraction = numPasses <= 1 ? 0 : pass / (numPasses - 1);
+      const isReversePass = pass % 2 === 1;
 
-    if (flyEW) {
-      // Cross axis is N-S: each pass is a horizontal E-W line
-      const lat = minLat + fraction * (maxLat - minLat);
-      const startLng = reverse ? maxLng : minLng;
-      const endLng = reverse ? minLng : maxLng;
-      wpLat1 = lat;
-      wpLng1 = startLng;
-      wpLat2 = lat;
-      wpLng2 = endLng;
-    } else {
-      // Cross axis is E-W: each pass is a vertical N-S line
-      const lng = minLng + fraction * (maxLng - minLng);
-      const startLat = reverse ? maxLat : minLat;
-      const endLat = reverse ? minLat : maxLat;
-      wpLat1 = startLat;
-      wpLng1 = lng;
-      wpLat2 = endLat;
-      wpLng2 = lng;
+      let wpLat1: number, wpLng1: number, wpLat2: number, wpLng2: number;
+
+      if (flyEW) {
+        const lat = minLat + fraction * (maxLat - minLat);
+        const startLng = isReversePass ? maxLng : minLng;
+        const endLng = isReversePass ? minLng : maxLng;
+        wpLat1 = lat;
+        wpLng1 = startLng;
+        wpLat2 = lat;
+        wpLng2 = endLng;
+      } else {
+        const lng = minLng + fraction * (maxLng - minLng);
+        const startLat = isReversePass ? maxLat : minLat;
+        const endLat = isReversePass ? minLat : maxLat;
+        wpLat1 = startLat;
+        wpLng1 = lng;
+        wpLat2 = endLat;
+        wpLng2 = lng;
+      }
+
+      const [rLat1, rLng1] = rotatePoint(wpLat1, wpLng1);
+      const [rLat2, rLng2] = rotatePoint(wpLat2, wpLng2);
+
+      waypoints.push({
+        ...DEFAULT_WAYPOINT,
+        latitude: rLat1,
+        longitude: rLng1,
+        height: altitude,
+        gimbalPitchAngle,
+        useGlobalHeadingParam: false,
+        headingMode: "followWayline",
+        turnMode: "toPointAndStopWithContinuityCurvature",
+        useGlobalTurnParam: false,
+        actions: addPhotos ? [{ ...takePhotoAction, actionId: 0 }] : [],
+      });
+      waypoints.push({
+        ...DEFAULT_WAYPOINT,
+        latitude: rLat2,
+        longitude: rLng2,
+        height: altitude,
+        gimbalPitchAngle,
+        useGlobalHeadingParam: false,
+        headingMode: "followWayline",
+        turnMode: "toPointAndStopWithContinuityCurvature",
+        useGlobalTurnParam: false,
+        actions: addPhotos ? [{ ...takePhotoAction, actionId: 0 }] : [],
+      });
     }
+  }
 
-    // Apply rotation
-    const [rLat1, rLng1] = rotatePoint(wpLat1, wpLng1);
-    const [rLat2, rLng2] = rotatePoint(wpLat2, wpLng2);
+  const primaryFlyEW = widthM >= heightM;
+  appendGridPasses(primaryFlyEW);
 
-    waypoints.push({
-      ...DEFAULT_WAYPOINT,
-      latitude: rLat1,
-      longitude: rLng1,
-      height: altitude,
-      gimbalPitchAngle: -90,
-      useGlobalHeadingParam: false,
-      headingMode: "followWayline",
-      turnMode: "toPointAndStopWithContinuityCurvature",
-      useGlobalTurnParam: false,
-      actions: addPhotos ? [{ ...takePhotoAction, actionId: 0 }] : [],
-    });
-    waypoints.push({
-      ...DEFAULT_WAYPOINT,
-      latitude: rLat2,
-      longitude: rLng2,
-      height: altitude,
-      gimbalPitchAngle: -90,
-      useGlobalHeadingParam: false,
-      headingMode: "followWayline",
-      turnMode: "toPointAndStopWithContinuityCurvature",
-      useGlobalTurnParam: false,
-      actions: addPhotos ? [{ ...takePhotoAction, actionId: 0 }] : [],
-    });
+  if (crosshatch) {
+    appendGridPasses(!primaryFlyEW);
   }
 
   if (reverse) {

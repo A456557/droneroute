@@ -1,4 +1,11 @@
-import type { AdminUser, PaginatedResponse } from "@droneroute/shared";
+import type {
+  AdminUser,
+  MissionConfig,
+  Obstacle,
+  PaginatedResponse,
+  PointOfInterest,
+  Waypoint,
+} from "@droneroute/shared";
 import { useMissionStore } from "@/store/missionStore";
 import { useAuthStore } from "@/store/authStore";
 
@@ -10,6 +17,11 @@ export interface DetectedBuilding {
   centroid: { lat: number; lng: number };
   confidence: number;
   estimatedHeightM: number | null;
+  heightSource: "osm-height" | "osm-levels" | null;
+  levels: number | null;
+  roofShape: string | null;
+  roofDirectionDeg: number | null;
+  roofHeightM: number | null;
   source: string;
   distanceToQueryM: number;
 }
@@ -17,6 +29,62 @@ export interface DetectedBuilding {
 export interface DetectBuildingResponse {
   building: DetectedBuilding;
   candidates: DetectedBuilding[];
+}
+
+export interface RnbBuildingExternalId {
+  id: string;
+  source: string;
+  createdAt: string | null;
+  sourceVersion: string | null;
+}
+
+export interface RnbBuilding {
+  rnbId: string;
+  status: string | null;
+  point: { lat: number; lng: number };
+  footprint: Array<{ lat: number; lng: number }>;
+  extIds: RnbBuildingExternalId[];
+  bdTopoId: string | null;
+  isActive: boolean;
+  addressCount: number;
+}
+
+export interface RnbBuildingsResponse {
+  buildings: RnbBuilding[];
+}
+
+export interface BdTopoMatchedBuilding {
+  cleabs: string;
+  nature: string | null;
+  usage1: string | null;
+  usage2: string | null;
+  heightM: number | null;
+  floorCount: number | null;
+  status: string | null;
+  origin: string | null;
+  sourceMethodPlanimetric: string | null;
+  sourceMethodAltimetric: string | null;
+  rnbIds: string | null;
+  centroid: { lat: number; lng: number };
+  footprint: Array<{ lat: number; lng: number }>;
+}
+
+export interface BdTopoMatchedBuildingResponse {
+  building: BdTopoMatchedBuilding | null;
+}
+
+export interface BdnbBuildingEnrichment {
+  batimentGroupeId: string | null;
+  constructionYear: number | null;
+  wallMaterial: string | null;
+  clayRisk: string | null;
+  heatingType: string | null;
+  dpeClass: string | null;
+  gesClass: string | null;
+}
+
+export interface BdnbBuildingEnrichmentResponse {
+  building: BdnbBuildingEnrichment | null;
 }
 
 export type FacadeCopilotObjective =
@@ -51,6 +119,27 @@ export interface FacadeCopilotRecommendation {
   confidence: number;
   currentVariantId: string | null;
   currentVariantMatchesRecommendation: boolean | null;
+}
+
+export interface MissionAssistantSuggestedAction {
+  label: string;
+  detail: string;
+}
+
+export type MissionAssistantTemplateMode =
+  | "orbit"
+  | "grid"
+  | "facade"
+  | "pencil"
+  | null;
+
+export interface MissionAssistantResponse {
+  answer: string;
+  bullets: string[];
+  warnings: string[];
+  suggestedActions: MissionAssistantSuggestedAction[];
+  source: "github-models" | "openai-compatible";
+  usedModel: string | null;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -121,6 +210,12 @@ export const api = {
 export const buildingApi = {
   detectNearest: (body: { lat: number; lng: number; radiusM?: number }) =>
     api.post<DetectBuildingResponse>("/buildings/detect", body),
+  listRnbBuildings: (bbox: [number, number, number, number]) =>
+    api.get<RnbBuildingsResponse>(`/buildings/rnb?bbox=${bbox.join(",")}`),
+  matchBdTopoBuilding: (body: { rnbId?: string; bdTopoId?: string | null }) =>
+    api.post<BdTopoMatchedBuildingResponse>("/buildings/bdtopo-match", body),
+  enrichBdnbBuilding: (body: { rnbId: string }) =>
+    api.post<BdnbBuildingEnrichmentResponse>("/buildings/bdnb-enrich", body),
   recommendFacadeScan: (body: {
     objective?: FacadeCopilotObjective;
     currentVariantId?: string | null;
@@ -142,6 +237,18 @@ export const buildingApi = {
       "/buildings/recommend-facade-scan",
       body,
     ),
+};
+
+export const missionAssistantApi = {
+  analyzeMission: (body: {
+    prompt: string;
+    missionName: string;
+    templateMode: MissionAssistantTemplateMode;
+    config: MissionConfig;
+    waypoints: Waypoint[];
+    pois: PointOfInterest[];
+    obstacles: Obstacle[];
+  }) => api.post<MissionAssistantResponse>("/assistant/mission", body),
 };
 
 // Admin API
