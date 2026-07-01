@@ -11,6 +11,7 @@ import {
   RenderingType,
   useMap,
 } from "@vis.gl/react-google-maps";
+import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
@@ -54,6 +55,125 @@ import {
   PolylineOverlay,
 } from "./googleMapOverlays";
 import { RnbBuildingsLayer } from "./RnbBuildingsLayer";
+
+type DraggablePanelProps = {
+  className: string;
+  defaultPosition: { x: number; y: number };
+  title: string;
+  onClose?: () => void;
+  children: React.ReactNode;
+};
+
+function DraggablePanel({
+  className,
+  defaultPosition,
+  title,
+  onClose,
+  children,
+}: DraggablePanelProps) {
+  const [position, setPosition] = useState(defaultPosition);
+  const dragStateRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+
+  useEffect(() => {
+    setPosition(defaultPosition);
+  }, [defaultPosition.x, defaultPosition.y]);
+
+  const handlePointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      dragStateRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        originX: position.x,
+        originY: position.y,
+      };
+
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [position.x, position.y],
+  );
+
+  const handlePointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      setPosition({
+        x: dragState.originX + event.clientX - dragState.startX,
+        y: dragState.originY + event.clientY - dragState.startY,
+      });
+      event.stopPropagation();
+    },
+    [],
+  );
+
+  const handlePointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      dragStateRef.current = null;
+      event.currentTarget.releasePointerCapture(event.pointerId);
+      event.stopPropagation();
+    },
+    [],
+  );
+
+  return (
+    <div
+      className={`${className} absolute`}
+      style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onPointerMove={(event) => event.stopPropagation()}
+      onPointerUp={(event) => event.stopPropagation()}
+    >
+      <div className="rounded-lg border border-border bg-background/95 shadow-lg backdrop-blur-sm">
+        <div
+          className="flex cursor-grab items-center justify-between gap-3 rounded-t-lg border-b border-border/70 px-3 py-2 active:cursor-grabbing"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+        >
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {title}
+          </div>
+          {onClose ? (
+            <button
+              className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onClose();
+              }}
+              type="button"
+            >
+              Fermer
+            </button>
+          ) : null}
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 type LatLng = google.maps.LatLngLiteral;
 type TemplateMode = "orbit" | "grid" | "facade" | "pencil" | null;
@@ -118,6 +238,20 @@ type ReconstructionPresetOption = {
   orbitParams?: OrbitParams;
   gridParams?: GridParams;
   facadeParams?: FacadeParams;
+};
+
+type BuildingScanMode = "reconstruction-3d" | "facade-scan";
+
+type BuildingScanVariantOption = {
+  id: string;
+  label: string;
+  detail: string;
+  description: string;
+};
+
+type BuildingScanPreview = {
+  mission: TemplateResult;
+  label: string;
 };
 
 type StreetViewContext = {
@@ -278,6 +412,141 @@ function toDetectedBuildingFromRnb(
   };
 }
 
+function estimatedBuildingHeightM(
+  building: RnbBuilding,
+  bdTopoBuilding?: BdTopoMatchedBuilding | null,
+): number {
+  if (bdTopoBuilding?.heightM != null) {
+    return clamp(bdTopoBuilding.heightM, 12, 120);
+  }
+
+  const footprintAreaM2 = footprintAreaMeters(building.footprint);
+  const heuristicHeightM = clamp(
+    12 + Math.sqrt(Math.max(footprintAreaM2, 1)) * 0.32,
+    11,
+    48,
+  );
+
+  return clamp(heuristicHeightM, 12, 120);
+}
+
+function buildBuildingScanFacadeParams(
+  segment: FacadeSegmentOption,
+  heightM: number,
+  density: "standard" | "dense",
+): FacadeParams {
+  const distanceM =
+    density === "dense"
+      ? Math.round(clamp(Math.max(10, heightM * 0.42), 10, 20))
+      : Math.round(clamp(Math.max(12, heightM * 0.55), 12, 28));
+  const numRows =
+    density === "dense"
+      ? Math.round(clamp(Math.ceil(heightM / 4.5), 6, 10))
+      : Math.round(clamp(Math.ceil(heightM / 6), 4, 8));
+  const numColumns =
+    density === "dense"
+      ? Math.round(clamp(Math.ceil(segment.lengthM / 3.6), 8, 16))
+      : Math.round(clamp(Math.ceil(segment.lengthM / 5), 5, 12));
+
+  return {
+    ...DEFAULT_FACADE_PARAMS,
+    ...(density === "dense"
+      ? MISSION_PLANNER_DENSE_FACADE_PARAMS
+      : MISSION_PLANNER_VERTICAL_FACADE_PARAMS),
+    point1: [segment.start.lat, segment.start.lng],
+    point2: [segment.end.lat, segment.end.lng],
+    distanceM,
+    minAltitude: 8,
+    maxAltitude: Math.round(
+      clamp(heightM + (density === "dense" ? 12 : 8), 24, 100),
+    ),
+    numRows,
+    numColumns,
+    addPhotos: true,
+  };
+}
+
+function appendTemplateResultWithOffset(
+  target: TemplateResult,
+  result: TemplateResult,
+  namePrefix: string,
+) {
+  const currentWaypointCount = target.waypoints.length;
+  target.waypoints.push(
+    ...result.waypoints.map((waypoint, index) => ({
+      ...waypoint,
+      name: `${namePrefix} ${currentWaypointCount + index + 1}`,
+    })),
+  );
+  target.pois.push(...result.pois);
+}
+
+function generateFacadeMissionForAllSegments(args: {
+  segments: FacadeSegmentOption[];
+  heightM: number;
+  density: "standard" | "dense";
+}): TemplateResult {
+  const mission: TemplateResult = { waypoints: [], pois: [] };
+
+  for (const segment of args.segments) {
+    const params = buildBuildingScanFacadeParams(
+      segment,
+      args.heightM,
+      args.density,
+    );
+    const result = generateFacade(params);
+    appendTemplateResultWithOffset(
+      mission,
+      result,
+      `${segment.label} waypoint`,
+    );
+  }
+
+  return mission;
+}
+
+function generateBuildingReconstructionMission(args: {
+  building: DetectedBuilding;
+  selectedSegment: FacadeSegmentOption | null;
+}): TemplateResult | null {
+  const presets = buildReconstructionPresets(
+    args.building,
+    args.selectedSegment,
+  );
+
+  const preferredOrder = ["building-grid-3d", "roof-grid", "oblique-orbit"];
+  const selectedPresets = preferredOrder
+    .map((id) => presets.find((preset) => preset.id === id))
+    .filter((preset): preset is ReconstructionPresetOption => preset != null);
+
+  if (selectedPresets.length === 0) {
+    return null;
+  }
+
+  const mission: TemplateResult = { waypoints: [], pois: [] };
+
+  for (const preset of selectedPresets) {
+    if (preset.templateType === "grid" && preset.gridParams) {
+      appendTemplateResultWithOffset(
+        mission,
+        generateGrid(preset.gridParams),
+        `${preset.label} waypoint`,
+      );
+      continue;
+    }
+
+    if (preset.templateType === "orbit" && preset.orbitParams) {
+      appendTemplateResultWithOffset(
+        mission,
+        generateOrbit(preset.orbitParams),
+        `${preset.label} waypoint`,
+      );
+    }
+  }
+
+  return mission;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -293,7 +562,7 @@ function buildRnbInfoWindowContent(args: {
   threeDMarkers: Buildings3DMarker[];
   approximateBuildingShell: ReconstructedBuildingShell | null;
   loading: boolean;
-}): string {
+}): React.ReactNode {
   const {
     building,
     bdTopoBuilding,
@@ -319,43 +588,100 @@ function buildRnbInfoWindowContent(args: {
   const footprintMetrics = footprintMetricsSummary(footprintForSegments);
   const segmentLengthsHtml =
     buildFootprintSegmentLengthsHtml(footprintForSegments);
-  const markersHtml = threeDMarkers
-    .map(
-      (marker) =>
-        `<div><strong>${escapeHtml(marker.glyph)}:</strong> ${escapeHtml(marker.label)}</div>`,
-    )
-    .join("");
+  const segmentRows = segmentLengthsHtml
+    .split("</div>")
+    .filter((row) => row.trim().length > 0)
+    .map((row, index) => (
+      <div key={`segment-row-${index}`}>{row.replace(/<[^>]+>/g, "")}</div>
+    ));
 
-  return `<div style="font-size:12px;min-width:220px;max-width:300px;line-height:1.45;color:#000000;background:#ffffff">
-    <div style="font-weight:700;margin-bottom:4px;color:#000000">Bâtiment RNB</div>
-    <div><strong>RNB:</strong> ${escapeHtml(building.rnbId)}</div>
-    <div><strong>Statut:</strong> ${escapeHtml(rnbStatus)}</div>
-    <div><strong>Adresses liées:</strong> ${building.addressCount}</div>
-    <div><strong>Actif:</strong> ${building.isActive ? "oui" : "non"}</div>
-    <div style="margin-top:6px;font-weight:700;color:#000000">BD TOPO</div>
-    ${loading ? '<div style="color:#000000">Chargement BD TOPO…</div>' : ""}
-    <div><strong>Cleabs:</strong> ${escapeHtml(bdTopoBuilding?.cleabs ?? building.bdTopoId ?? "n/a")}</div>
-    <div><strong>Nature:</strong> ${escapeHtml(bdTopoBuilding?.nature ?? "n/a")}</div>
-    <div><strong>Usage:</strong> ${escapeHtml(usageLine || "n/a")}</div>
-    <div><strong>Hauteur:</strong> ${escapeHtml(bdTopoHeight)}</div>
-    <div><strong>Étages:</strong> ${escapeHtml(bdTopoFloors)}</div>
-    <div><strong>Origine:</strong> ${escapeHtml(bdTopoBuilding?.origin ?? "n/a")}</div>
-    <div style="margin-top:6px;font-weight:700;color:#000000">Dimensions</div>
-    <div><strong>Périmètre:</strong> ${escapeHtml(footprintMetrics.perimeterLabel)}</div>
-    <div><strong>Longueur max:</strong> ${escapeHtml(footprintMetrics.lengthLabel)}</div>
-    <div><strong>Largeur max:</strong> ${escapeHtml(footprintMetrics.widthLabel)}</div>
-    <div><strong>Surface approx.:</strong> ${escapeHtml(footprintMetrics.areaLabel)}</div>
-    ${segmentLengthsHtml ? `<div style="margin-top:6px;font-weight:700;color:#000000">Segments du polygone</div>${segmentLengthsHtml}` : ""}
-    ${threeDMarkers.length > 0 ? `<div style="margin-top:6px;font-weight:700;color:#000000">3D mission markers</div>${markersHtml}` : ""}
-    ${
-      approximateBuildingShell
-        ? `<div style="margin-top:6px;font-weight:700;color:#000000">Hybrid 3D building estimate</div>
-    <div>${escapeHtml(approximateBuildingShell.roofStyleLabel)} at about ${escapeHtml(String(Math.round(approximateBuildingShell.estimatedHeightM)))}m.</div>
-    <div style="color:#000000">${escapeHtml(approximateBuildingShell.heightSourceLabel)} / ${escapeHtml(approximateBuildingShell.streetViewLabel)}</div>
-    <div><strong>Credibility:</strong> ${escapeHtml(String(approximateBuildingShell.confidencePercent))}%</div>`
-        : ""
-    }
-  </div>`;
+  return (
+    <div className="min-w-[220px] max-w-[300px] bg-white text-[12px] leading-[1.45] text-black">
+      <div className="font-bold text-black">Bâtiment RNB</div>
+      <div className="mt-2 font-bold text-black">Dimensions</div>
+      <div>
+        <strong>Hauteur:</strong> {bdTopoHeight}
+      </div>
+      <div>
+        <strong>Périmètre:</strong> {footprintMetrics.perimeterLabel}
+      </div>
+      <div>
+        <strong>Longueur max:</strong> {footprintMetrics.lengthLabel}
+      </div>
+      <div>
+        <strong>Largeur max:</strong> {footprintMetrics.widthLabel}
+      </div>
+      <div>
+        <strong>Surface approx.:</strong> {footprintMetrics.areaLabel}
+      </div>
+      {segmentRows.length > 0 ? (
+        <>
+          <div className="mt-2 font-bold text-black">Segments du polygone</div>
+          {segmentRows}
+        </>
+      ) : null}
+      <div className="mt-2 font-bold text-black">RNB</div>
+      <div>
+        <strong>RNB:</strong> {building.rnbId}
+      </div>
+      <div>
+        <strong>Statut:</strong> {rnbStatus}
+      </div>
+      <div>
+        <strong>Adresses liées:</strong> {building.addressCount}
+      </div>
+      <div>
+        <strong>Actif:</strong> {building.isActive ? "oui" : "non"}
+      </div>
+      <div className="mt-2 font-bold text-black">BD TOPO</div>
+      {loading ? <div className="text-black">Chargement BD TOPO…</div> : null}
+      <div>
+        <strong>Cleabs:</strong>{" "}
+        {bdTopoBuilding?.cleabs ?? building.bdTopoId ?? "n/a"}
+      </div>
+      <div>
+        <strong>Nature:</strong> {bdTopoBuilding?.nature ?? "n/a"}
+      </div>
+      <div>
+        <strong>Usage:</strong> {usageLine || "n/a"}
+      </div>
+      <div>
+        <strong>Étages:</strong> {bdTopoFloors}
+      </div>
+      <div>
+        <strong>Origine:</strong> {bdTopoBuilding?.origin ?? "n/a"}
+      </div>
+      {threeDMarkers.length > 0 ? (
+        <>
+          <div className="mt-2 font-bold text-black">3D mission markers</div>
+          {threeDMarkers.map((marker) => (
+            <div key={marker.id}>
+              <strong>{marker.glyph}:</strong> {marker.label}
+            </div>
+          ))}
+        </>
+      ) : null}
+      {approximateBuildingShell ? (
+        <>
+          <div className="mt-2 font-bold text-black">
+            Hybrid 3D building estimate
+          </div>
+          <div>
+            {approximateBuildingShell.roofStyleLabel} at about{" "}
+            {Math.round(approximateBuildingShell.estimatedHeightM)}m.
+          </div>
+          <div className="text-black">
+            {approximateBuildingShell.heightSourceLabel} /{" "}
+            {approximateBuildingShell.streetViewLabel}
+          </div>
+          <div>
+            <strong>Credibility:</strong>{" "}
+            {approximateBuildingShell.confidencePercent}%
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 function buildFootprintSegmentLengthsHtml(footprint: LatLng[]): string {
@@ -825,6 +1151,55 @@ function pointToSegmentDistanceMeters(
   const projectionX = startXY.x + t * segmentDx;
   const projectionY = startXY.y + t * segmentDy;
   return Math.hypot(pointXY.x - projectionX, pointXY.y - projectionY);
+}
+
+function footprintSelectionDistanceMeters(
+  point: LatLng,
+  footprint: LatLng[],
+): number {
+  const normalized = normalizeFootprint(footprint);
+  if (normalized.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  if (
+    pointInPolygon(
+      [point.lat, point.lng],
+      normalized.map((vertex) => [vertex.lat, vertex.lng]),
+    )
+  ) {
+    return 0;
+  }
+
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const start = normalized[index];
+    const end = normalized[(index + 1) % normalized.length];
+    bestDistance = Math.min(
+      bestDistance,
+      pointToSegmentDistanceMeters(point, start, end),
+    );
+  }
+
+  return bestDistance;
+}
+
+function findSelectableRnbBuilding(
+  point: LatLng,
+  buildings: RnbBuilding[],
+): RnbBuilding | null {
+  const selectionThresholdM = 14;
+
+  const bestMatch = buildings
+    .map((building) => ({
+      building,
+      distanceM: footprintSelectionDistanceMeters(point, building.footprint),
+    }))
+    .filter((candidate) => candidate.distanceM <= selectionThresholdM)
+    .sort((left, right) => left.distanceM - right.distanceM)[0];
+
+  return bestMatch?.building ?? null;
 }
 
 function rankFacadeSegments(
@@ -1977,17 +2352,6 @@ function Buildings3DPanel({
             </Marker3D>
           ))}
         </Map3D>
-        {scanRoute && (
-          <div className="pointer-events-none absolute left-3 bottom-3 max-w-[250px] rounded-md border border-amber-500/30 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
-            <p className="font-medium text-foreground">Scan route in 3D</p>
-            <p className="text-muted-foreground">{scanRoute.title}</p>
-            <p className="text-muted-foreground">
-              {scanRoute.path.length} waypoint
-              {scanRoute.path.length > 1 ? "s" : ""} with the full scan
-              trajectory.
-            </p>
-          </div>
-        )}
         {rnbBuildings.length === 0 && (
           <div className="pointer-events-none absolute right-3 top-3 max-w-[260px] rounded-md border border-sky-500/25 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
             <p className="font-medium text-foreground">Bâtiments 2D</p>
@@ -2387,6 +2751,21 @@ function MapInteraction({
           return;
         }
 
+        if (rnbSelectionEnabled) {
+          const selectedBuilding = findSelectableRnbBuilding(
+            { lat: point[0], lng: point[1] },
+            rnbBuildings,
+          );
+
+          if (selectedBuilding) {
+            onSelectRnbBuilding(selectedBuilding, {
+              lat: point[0],
+              lng: point[1],
+            });
+            return;
+          }
+        }
+
         if (isAddingWaypoint) {
           addWaypoint(point[0], point[1]);
           return;
@@ -2398,21 +2777,7 @@ function MapInteraction({
         }
 
         if (rnbSelectionEnabled) {
-          const selectedBuilding = rnbBuildings.find((building) =>
-            pointInPolygon(
-              point,
-              building.footprint.map((vertex) => [vertex.lat, vertex.lng]),
-            ),
-          );
-
-          if (selectedBuilding) {
-            onSelectRnbBuilding(selectedBuilding, {
-              lat: point[0],
-              lng: point[1],
-            });
-          } else {
-            onClearRnbSelection();
-          }
+          onClearRnbSelection();
         }
       },
     );
@@ -2527,10 +2892,9 @@ export function MapView() {
   const setTemplateMode = useMissionStore((s) => s.setTemplateMode);
   const vizPrefs = usePreferencesStore((s) => s.preferences?.visualization);
 
-  const [mapTypeId, setMapTypeId] = useState<google.maps.MapTypeId>(
-    vizPrefs?.mapStyle === "street" ? ROADMAP_TYPE : HYBRID_TYPE,
-  );
-  const [is3D, setIs3D] = useState(vizPrefs?.viewMode === "3d");
+  const [mapTypeId, setMapTypeId] =
+    useState<google.maps.MapTypeId>(ROADMAP_TYPE);
+  const [is3D, setIs3D] = useState(false);
   const [searchValue, setSearchValue] = useState("");
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const [dragState, setDragState] = useState<{
@@ -2572,16 +2936,23 @@ export function MapView() {
     useState<FacadeCopilotRecommendation | null>(null);
   const [facadeRecommendationBusy, setFacadeRecommendationBusy] =
     useState(false);
-  const [showRnbLayer, setShowRnbLayer] = useState(true);
+  const [showRnbLayer, setShowRnbLayer] = useState(false);
   const [rnbBuildings, setRnbBuildings] = useState<RnbBuilding[]>([]);
   const [selectedRnbBuilding, setSelectedRnbBuilding] =
     useState<SelectedRnbBuilding | null>(null);
+  const [showSelectedRnbInfo, setShowSelectedRnbInfo] = useState(false);
+  const [showSelectedBuildingScanPanel, setShowSelectedBuildingScanPanel] =
+    useState(false);
   const [selectedBdTopoBuilding, setSelectedBdTopoBuilding] =
     useState<BdTopoMatchedBuilding | null>(null);
   const [selectedBdnbBuilding, setSelectedBdnbBuilding] =
     useState<BdnbBuildingEnrichment | null>(null);
   const [selectedRnbBuildingLoading, setSelectedRnbBuildingLoading] =
     useState(false);
+  const [selectedBuildingScanMode, setSelectedBuildingScanMode] =
+    useState<BuildingScanMode>("reconstruction-3d");
+  const [selectedBuildingScanVariantId, setSelectedBuildingScanVariantId] =
+    useState<string>("balanced");
   const [streetViewContext, setStreetViewContext] =
     useState<StreetViewContext | null>(null);
   const [mainMapViewport, setMainMapViewport] =
@@ -2655,6 +3026,137 @@ export function MapView() {
     [facadeSegmentOptions, selectedFacadeSegmentId],
   );
 
+  const selectedBuildingFacadeSegments = useMemo(() => {
+    if (!selectedRnbBuilding) {
+      return [] as FacadeSegmentOption[];
+    }
+
+    const footprint =
+      selectedBdTopoBuilding?.footprint ??
+      selectedRnbBuilding.building.footprint;
+    const fallbackStart = footprint[0];
+    const fallbackEnd = footprint[1] ?? footprint[0];
+
+    return rankFacadeSegments(footprint, fallbackStart, fallbackEnd);
+  }, [selectedBdTopoBuilding, selectedRnbBuilding]);
+
+  const selectedBuildingDetected = useMemo(() => {
+    if (!selectedRnbBuilding) {
+      return null;
+    }
+
+    return toDetectedBuildingFromRnb(
+      selectedRnbBuilding.building,
+      selectedBdTopoBuilding,
+    );
+  }, [selectedBdTopoBuilding, selectedRnbBuilding]);
+
+  const selectedBuildingHeightM = useMemo(() => {
+    if (!selectedRnbBuilding) {
+      return null;
+    }
+
+    return estimatedBuildingHeightM(
+      selectedRnbBuilding.building,
+      selectedBdTopoBuilding,
+    );
+  }, [selectedBdTopoBuilding, selectedRnbBuilding]);
+
+  const buildingScanVariants = useMemo<BuildingScanVariantOption[]>(() => {
+    if (selectedBuildingScanMode === "reconstruction-3d") {
+      return [
+        {
+          id: "building-3d-default",
+          label: "Photogrammétrie 3D",
+          detail: "Grille oblique + toit + orbite",
+          description:
+            "Prépare un plan de vol de reconstruction 3D pour le bâtiment sélectionné.",
+        },
+      ];
+    }
+
+    return [
+      {
+        id: "balanced",
+        label: "Façades standard",
+        detail: "Couverture équilibrée",
+        description:
+          "Scanne chaque façade une à une avec une densité adaptée à l’inspection générale.",
+      },
+      {
+        id: "dense",
+        label: "Façades denses",
+        detail: "Photogrammétrie plus serrée",
+        description:
+          "Ajoute plus de lignes et colonnes sur chaque façade pour une couverture plus dense.",
+      },
+    ];
+  }, [selectedBuildingScanMode]);
+
+  const selectedBuildingScanVariant = useMemo(
+    () =>
+      buildingScanVariants.find(
+        (variant) => variant.id === selectedBuildingScanVariantId,
+      ) ??
+      buildingScanVariants[0] ??
+      null,
+    [buildingScanVariants, selectedBuildingScanVariantId],
+  );
+
+  const selectedBuildingScanPreview =
+    useMemo<BuildingScanPreview | null>(() => {
+      if (
+        !selectedRnbBuilding ||
+        !selectedBuildingDetected ||
+        !selectedBuildingHeightM
+      ) {
+        return null;
+      }
+
+      if (selectedBuildingScanMode === "reconstruction-3d") {
+        const mission = generateBuildingReconstructionMission({
+          building: selectedBuildingDetected,
+          selectedSegment: selectedBuildingFacadeSegments[0] ?? null,
+        });
+
+        if (!mission || mission.waypoints.length === 0) {
+          return null;
+        }
+
+        return {
+          mission,
+          label: "Aperçu reconstruction 3D bâtiment",
+        };
+      }
+
+      if (selectedBuildingFacadeSegments.length === 0) {
+        return null;
+      }
+
+      const mission = generateFacadeMissionForAllSegments({
+        segments: selectedBuildingFacadeSegments,
+        heightM: selectedBuildingHeightM,
+        density:
+          selectedBuildingScanVariant?.id === "dense" ? "dense" : "standard",
+      });
+
+      if (mission.waypoints.length === 0) {
+        return null;
+      }
+
+      return {
+        mission,
+        label: "Aperçu scan des façades",
+      };
+    }, [
+      selectedBuildingDetected,
+      selectedBuildingFacadeSegments,
+      selectedBuildingHeightM,
+      selectedBuildingScanMode,
+      selectedBuildingScanVariant,
+      selectedRnbBuilding,
+    ]);
+
   const reconstructionPresets = useMemo(
     () =>
       detectedBuilding
@@ -2680,6 +3182,18 @@ export function MapView() {
         : pencilParams
           ? "pencil"
           : null;
+
+  const mapPreview = activeTemplateType
+    ? templatePreview
+    : showSelectedBuildingScanPanel
+      ? (selectedBuildingScanPreview?.mission ?? null)
+      : null;
+
+  const mapPreviewLabel = activeTemplateType
+    ? `Current ${activeTemplateType} template`
+    : showSelectedBuildingScanPanel
+      ? (selectedBuildingScanPreview?.label ?? null)
+      : null;
 
   const buildings3DView = useMemo(
     () =>
@@ -2745,6 +3259,15 @@ export function MapView() {
     );
   }, [selectedBdTopoBuilding, selectedRnbBuilding]);
 
+  const clearSelectedBuildingUi = useCallback(() => {
+    setSelectedRnbBuilding(null);
+    setShowSelectedRnbInfo(false);
+    setShowSelectedBuildingScanPanel(false);
+    setSelectedBdTopoBuilding(null);
+    setSelectedBdnbBuilding(null);
+    setSelectedRnbBuildingLoading(false);
+  }, []);
+
   const contextShells = useMemo(
     () =>
       detectedBuildingCandidates
@@ -2763,18 +3286,16 @@ export function MapView() {
   );
 
   const scanRoute3D = useMemo<Buildings3DScanRoute | null>(() => {
-    const previewWaypoints = templatePreview?.waypoints ?? [];
+    const previewWaypoints = mapPreview?.waypoints ?? [];
     const routeWaypoints =
-      activeTemplateType && previewWaypoints.length > 0
-        ? previewWaypoints
-        : waypoints;
+      previewWaypoints.length > 0 ? previewWaypoints : waypoints;
 
     if (routeWaypoints.length === 0) return null;
 
     return {
       title:
-        activeTemplateType && previewWaypoints.length > 0
-          ? `Current ${activeTemplateType} template`
+        previewWaypoints.length > 0 && mapPreviewLabel
+          ? mapPreviewLabel
           : "Current mission route",
       path: routeWaypoints.map((waypoint) => ({
         lat: waypoint.latitude,
@@ -2796,26 +3317,27 @@ export function MapView() {
         scale: 0.92,
       })),
     };
-  }, [activeTemplateType, templatePreview, waypoints]);
+  }, [mapPreview, mapPreviewLabel, waypoints]);
 
   useEffect(() => {
     if (!showRnbLayer) {
       setRnbBuildings([]);
-      setSelectedRnbBuilding(null);
-      setSelectedBdTopoBuilding(null);
-      setSelectedBdnbBuilding(null);
-      setSelectedRnbBuildingLoading(false);
+      clearSelectedBuildingUi();
     }
-  }, [showRnbLayer]);
+  }, [clearSelectedBuildingUi, showRnbLayer]);
 
   useEffect(() => {
-    if (!is3D) {
-      setShowRnbLayer(true);
-    }
-  }, [is3D]);
+    setSelectedBuildingScanVariantId(
+      selectedBuildingScanMode === "reconstruction-3d"
+        ? "building-3d-default"
+        : "balanced",
+    );
+  }, [selectedBuildingScanMode]);
 
   useEffect(() => {
     if (!selectedRnbBuilding) {
+      setShowSelectedRnbInfo(false);
+      setShowSelectedBuildingScanPanel(false);
       setSelectedBdTopoBuilding(null);
       setSelectedBdnbBuilding(null);
       setSelectedRnbBuildingLoading(false);
@@ -2990,6 +3512,11 @@ export function MapView() {
     setFacadeRecommendationBusy(false);
     setStreetViewContext(null);
   }, []);
+
+  const clearTransientMapUi = useCallback(() => {
+    resetTemplateState();
+    clearSelectedBuildingUi();
+  }, [clearSelectedBuildingUi, resetTemplateState]);
 
   const applyFacadeScenario = useCallback(
     (
@@ -3299,6 +3826,86 @@ export function MapView() {
     [reconstructionPresets, setTemplateMode],
   );
 
+  const handleSelectedBuildingScanApply = useCallback(() => {
+    if (
+      !selectedRnbBuilding ||
+      !selectedBuildingDetected ||
+      !selectedBuildingHeightM
+    ) {
+      toast.error("Aucun bâtiment sélectionné exploitable.");
+      return;
+    }
+
+    if (selectedBuildingScanMode === "reconstruction-3d") {
+      const mission = generateBuildingReconstructionMission({
+        building: selectedBuildingDetected,
+        selectedSegment: selectedBuildingFacadeSegments[0] ?? null,
+      });
+
+      if (!mission || mission.waypoints.length === 0) {
+        toast.error("Impossible de générer le plan de vol 3D du bâtiment.");
+        return;
+      }
+
+      appendWaypoints(mission.waypoints, mission.pois);
+      toast.success(
+        `${mission.waypoints.length} waypoints ajoutés pour la reconstruction 3D du bâtiment.`,
+      );
+      return;
+    }
+
+    if (selectedBuildingFacadeSegments.length === 0) {
+      toast.error("Aucune façade exploitable n’a été trouvée.");
+      return;
+    }
+
+    const mission = generateFacadeMissionForAllSegments({
+      segments: selectedBuildingFacadeSegments,
+      heightM: selectedBuildingHeightM,
+      density:
+        selectedBuildingScanVariant?.id === "dense" ? "dense" : "standard",
+    });
+
+    if (mission.waypoints.length === 0) {
+      toast.error("Impossible de générer les waypoints de scan façade.");
+      return;
+    }
+
+    appendWaypoints(mission.waypoints, mission.pois);
+    toast.success(
+      `${mission.waypoints.length} waypoints ajoutés pour ${selectedBuildingFacadeSegments.length} façades.`,
+    );
+  }, [
+    appendWaypoints,
+    selectedBuildingDetected,
+    selectedBuildingFacadeSegments,
+    selectedBuildingHeightM,
+    selectedBuildingScanMode,
+    selectedBuildingScanVariant,
+    selectedRnbBuilding,
+  ]);
+
+  const handleSelectRnbBuilding = useCallback(
+    (building: RnbBuilding, position: google.maps.LatLngLiteral) => {
+      setSelectedRnbBuilding({ building, position });
+      setShowSelectedRnbInfo(true);
+    },
+    [],
+  );
+
+  const handleClearSelectedBuilding = useCallback(() => {
+    clearSelectedBuildingUi();
+  }, [clearSelectedBuildingUi]);
+
+  const openSelectedBuildingScanPanel = useCallback(() => {
+    if (!selectedRnbBuilding) {
+      toast.error("Sélectionnez d’abord un bâtiment.");
+      return;
+    }
+
+    setShowSelectedBuildingScanPanel(true);
+  }, [selectedRnbBuilding]);
+
   if (!googleMapsApiKey) {
     return (
       <div className="relative h-full w-full flex items-center justify-center bg-background text-muted-foreground">
@@ -3338,9 +3945,7 @@ export function MapView() {
             buildings={rnbBuildings}
             selectedBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
             onBuildingsChange={setRnbBuildings}
-            onSelectBuilding={(building, position) => {
-              setSelectedRnbBuilding({ building, position });
-            }}
+            onSelectBuilding={handleSelectRnbBuilding}
           />
           <MapInteraction
             targetTilt={is3D ? (mapTypeId === HYBRID_TYPE ? 67.5 : 45) : 0}
@@ -3356,10 +3961,8 @@ export function MapView() {
             setTemplateConfirmed={setTemplateConfirmed}
             rnbSelectionEnabled={showRnbLayer && !is3D}
             rnbBuildings={rnbBuildings}
-            onSelectRnbBuilding={(building, position) => {
-              setSelectedRnbBuilding({ building, position });
-            }}
-            onClearRnbSelection={() => setSelectedRnbBuilding(null)}
+            onSelectRnbBuilding={handleSelectRnbBuilding}
+            onClearRnbSelection={handleClearSelectedBuilding}
           />
           <MainMapViewportSync onChange={setMainMapViewport} />
           <FitBoundsOnLoad />
@@ -3712,8 +4315,8 @@ export function MapView() {
             />
           )}
 
-          {templatePreview?.waypoints.slice(0, -1).map((waypoint, index) => {
-            const next = templatePreview.waypoints[index + 1];
+          {mapPreview?.waypoints.slice(0, -1).map((waypoint, index) => {
+            const next = mapPreview.waypoints[index + 1];
             return (
               <PolylineOverlay
                 key={`template-line-${index}`}
@@ -3728,7 +4331,7 @@ export function MapView() {
             );
           })}
 
-          {templatePreview?.waypoints.map((waypoint, index) => (
+          {mapPreview?.waypoints.map((waypoint, index) => (
             <MarkerOverlay
               key={`template-waypoint-${index}`}
               position={toLatLng(waypoint.latitude, waypoint.longitude)}
@@ -3739,7 +4342,7 @@ export function MapView() {
             />
           ))}
 
-          {templatePreview?.pois.map((poi, index) => (
+          {mapPreview?.pois.map((poi, index) => (
             <MarkerOverlay
               key={`template-poi-${index}`}
               position={toLatLng(poi.latitude, poi.longitude)}
@@ -3761,23 +4364,147 @@ export function MapView() {
               zIndex={220}
             />
           )}
-
-          {showRnbLayer && !is3D && selectedRnbBuilding && (
-            <InfoWindowOverlay
-              position={selectedRnbBuilding.position}
-              content={buildRnbInfoWindowContent({
-                building: selectedRnbBuilding.building,
-                bdTopoBuilding: selectedBdTopoBuilding,
-                threeDMarkers: buildings3DMarkers,
-                approximateBuildingShell: reconstructionShell,
-                loading: selectedRnbBuildingLoading,
-              })}
-              onClose={() => setSelectedRnbBuilding(null)}
-            />
-          )}
         </Map>
 
         <MapSearch value={searchValue} onValueChange={setSearchValue} />
+
+        {showRnbLayer &&
+          !is3D &&
+          selectedRnbBuilding &&
+          showSelectedRnbInfo && (
+            <DraggablePanel
+              className="left-4 top-4 z-10 w-[320px]"
+              defaultPosition={{ x: 0, y: 0 }}
+              title="Bâtiment RNB"
+              onClose={handleClearSelectedBuilding}
+            >
+              <div className="p-3">
+                {buildRnbInfoWindowContent({
+                  building: selectedRnbBuilding.building,
+                  bdTopoBuilding: selectedBdTopoBuilding,
+                  threeDMarkers: buildings3DMarkers,
+                  approximateBuildingShell: reconstructionShell,
+                  loading: selectedRnbBuildingLoading,
+                })}
+              </div>
+            </DraggablePanel>
+          )}
+
+        {selectedRnbBuilding && showSelectedBuildingScanPanel && (
+          <DraggablePanel
+            className="left-4 top-4 z-10 w-[360px]"
+            defaultPosition={{ x: 340, y: 0 }}
+            title="Facade scan du bâtiment"
+            onClose={clearTransientMapUi}
+          >
+            <div className="p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-cyan-400">
+                    Facade scan du bâtiment
+                  </div>
+                  <div className="mt-1 text-sm font-medium text-foreground">
+                    {selectedRnbBuilding.building.rnbId}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {selectedBuildingFacadeSegments.length} façades détectées
+                    {selectedBuildingHeightM != null
+                      ? ` • hauteur ~ ${Math.round(selectedBuildingHeightM)} m`
+                      : ""}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  className={`rounded-md border px-3 py-2 text-left text-xs ${selectedBuildingScanMode === "reconstruction-3d" ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
+                  onClick={() =>
+                    setSelectedBuildingScanMode("reconstruction-3d")
+                  }
+                >
+                  <div className="font-medium">3D reconstruction</div>
+                  <div className="mt-1 text-[10px]">
+                    Plan de vol photogrammétrique du bâtiment sélectionné
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-md border px-3 py-2 text-left text-xs ${selectedBuildingScanMode === "facade-scan" ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
+                  onClick={() => setSelectedBuildingScanMode("facade-scan")}
+                >
+                  <div className="font-medium">Scan des façades</div>
+                  <div className="mt-1 text-[10px]">
+                    Waypoints façade par façade pour le bâtiment sélectionné
+                  </div>
+                </button>
+              </div>
+
+              <div className="mt-3 space-y-2">
+                {buildingScanVariants.map((variant) => (
+                  <button
+                    key={variant.id}
+                    type="button"
+                    onClick={() => setSelectedBuildingScanVariantId(variant.id)}
+                    className={`w-full rounded-md border px-3 py-2 text-left ${selectedBuildingScanVariant?.id === variant.id ? "border-primary bg-primary/10" : "border-border bg-background/60"}`}
+                  >
+                    <div className="text-xs font-medium text-foreground">
+                      {variant.label}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      {variant.detail}
+                    </div>
+                    <div className="mt-1 text-[10px] text-muted-foreground">
+                      {variant.description}
+                    </div>
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-3 rounded-md border border-cyan-500/30 bg-cyan-500/5 px-3 py-2 text-[11px] text-muted-foreground">
+                {selectedBuildingScanPreview
+                  ? `${selectedBuildingScanPreview.label} affiché sur la carte • ${selectedBuildingScanPreview.mission.waypoints.length} waypoints`
+                  : "Aucun aperçu exploitable pour cette configuration."}
+              </div>
+
+              {selectedBuildingScanMode === "facade-scan" &&
+                selectedBuildingFacadeSegments.length > 0 && (
+                  <div className="mt-3 rounded-md border border-border/70 bg-background/60 p-2">
+                    <div className="text-[11px] font-medium text-foreground">
+                      Façades prises en compte
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {selectedBuildingFacadeSegments.map((segment) => (
+                        <span
+                          key={segment.id}
+                          className="rounded-full border border-border px-2 py-1 text-[10px] text-muted-foreground"
+                        >
+                          {segment.label} • {segment.lengthM.toFixed(0)}m
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border border-border px-3 py-2 text-xs"
+                  onClick={clearTransientMapUi}
+                >
+                  Annuler
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
+                  onClick={handleSelectedBuildingScanApply}
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+          </DraggablePanel>
+        )}
 
         {templateMode && !templateConfirmed && (
           <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-md border border-border bg-background/95 px-4 py-2 text-xs text-muted-foreground shadow-lg">
@@ -3804,7 +4531,7 @@ export function MapView() {
               <button
                 className="rounded-md border border-border px-3 py-2 text-xs"
                 onClick={() => {
-                  resetTemplateState();
+                  clearTransientMapUi();
                   setTemplateMode(null);
                 }}
               >
@@ -3846,11 +4573,11 @@ export function MapView() {
             onPencilChange={setPencilParams}
             onApply={() => {
               appendWaypoints(templatePreview.waypoints, templatePreview.pois);
-              resetTemplateState();
+              clearTransientMapUi();
               setTemplateMode(null);
             }}
             onCancel={() => {
-              resetTemplateState();
+              clearTransientMapUi();
               setTemplateMode(null);
             }}
             onFacadeAssist={
@@ -4060,7 +4787,16 @@ export function MapView() {
           </div>
         )}
 
-        <MapToolbar />
+        <MapToolbar
+          selectedBuildingScanOption={{
+            enabled: selectedRnbBuilding != null,
+            description: selectedRnbBuilding
+              ? "Ouvre le scan facade du bâtiment sélectionné"
+              : "Sélectionnez un bâtiment sur la carte",
+            onClick: openSelectedBuildingScanPanel,
+          }}
+          onClearAll={clearTransientMapUi}
+        />
       </div>
     </APIProvider>
   );

@@ -380,11 +380,11 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
 };
 
 /**
- * Built-in default map view (Barcelona). Used when no DEFAULT_MAP_* env vars are
+ * Built-in default map view (Labarthe-sur-Leze). Used when no DEFAULT_MAP_* env vars are
  * configured, and as the client-side fallback before the config endpoint loads.
  */
 export const DEFAULT_MAP_VIEW: MapViewState = {
-  latitude: 41.3874,
-  longitude: 2.1686,
+  latitude: 43.4524351,
+  longitude: 1.4005078,
   zoom: 13,
 };

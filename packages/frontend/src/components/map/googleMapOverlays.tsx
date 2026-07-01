@@ -310,6 +310,7 @@ export function PolygonOverlay({
       "click",
       (event: google.maps.MapMouseEvent) => {
         if (!event.latLng) return;
+        event.stop();
         onClick({ lat: event.latLng.lat(), lng: event.latLng.lng() });
       },
     );

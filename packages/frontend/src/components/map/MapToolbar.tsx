@@ -61,7 +61,21 @@ const TEMPLATE_OPTIONS: {
   },
 ];
 
-export function MapToolbar() {
+interface SelectedBuildingScanOption {
+  enabled: boolean;
+  description: string;
+  onClick: () => void;
+}
+
+interface MapToolbarProps {
+  selectedBuildingScanOption?: SelectedBuildingScanOption | null;
+  onClearAll?: () => void;
+}
+
+export function MapToolbar({
+  selectedBuildingScanOption = null,
+  onClearAll,
+}: MapToolbarProps) {
   const {
     isAddingWaypoint,
     isAddingPoi,
@@ -180,25 +194,45 @@ export function MapToolbar() {
               const Icon = opt.icon;
               const isActive = templateMode === opt.type;
               return (
-                <button
-                  key={opt.type}
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent transition-colors ${isActive ? "bg-accent text-accent-foreground" : ""}`}
-                  onClick={() => {
-                    setTemplateMode(opt.type);
-                    setShowTemplateMenu(false);
-                  }}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <div className="text-left flex-1">
-                    <div className="font-medium">{opt.label}</div>
-                    <div className="text-[10px] text-muted-foreground">
-                      {opt.description}
+                <div key={opt.type}>
+                  <button
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent transition-colors ${isActive ? "bg-accent text-accent-foreground" : ""}`}
+                    onClick={() => {
+                      setTemplateMode(opt.type);
+                      setShowTemplateMenu(false);
+                    }}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <div className="text-left flex-1">
+                      <div className="font-medium">{opt.label}</div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {opt.description}
+                      </div>
                     </div>
-                  </div>
-                  <kbd className="text-[10px] font-mono font-bold border border-white/20 bg-white/10 px-1.5 py-0.5 rounded text-foreground/80 shrink-0">
-                    {opt.key}
-                  </kbd>
-                </button>
+                    <kbd className="text-[10px] font-mono font-bold border border-white/20 bg-white/10 px-1.5 py-0.5 rounded text-foreground/80 shrink-0">
+                      {opt.key}
+                    </kbd>
+                  </button>
+                  {opt.type === "facade" && selectedBuildingScanOption && (
+                    <button
+                      className={`w-full flex items-center gap-2 border-t border-border/60 px-3 py-2 pl-9 text-xs transition-colors ${selectedBuildingScanOption.enabled ? "hover:bg-accent" : "cursor-not-allowed opacity-60"}`}
+                      disabled={!selectedBuildingScanOption.enabled}
+                      onClick={() => {
+                        if (!selectedBuildingScanOption.enabled) return;
+                        selectedBuildingScanOption.onClick();
+                        setShowTemplateMenu(false);
+                      }}
+                    >
+                      <Building2 className="h-3.5 w-3.5 shrink-0" />
+                      <div className="text-left flex-1">
+                        <div className="font-medium">Bâtiment sélectionné</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          {selectedBuildingScanOption.description}
+                        </div>
+                      </div>
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -230,8 +264,10 @@ export function MapToolbar() {
           variant="outline"
           size="sm"
           onClick={() => {
-            if (confirm("Clear all waypoints, POIs, and obstacles?"))
+            if (confirm("Clear all waypoints, POIs, and obstacles?")) {
+              onClearAll?.();
               clearMission();
+            }
           }}
           title="Clear all waypoints, POIs, and obstacles"
           className="bg-background/90 backdrop-blur-sm text-destructive hover:text-destructive"
