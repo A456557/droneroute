@@ -139,6 +139,7 @@ function DraggablePanel({
     <div
       className={`${className} absolute`}
       style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+      onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
       onPointerMove={(event) => event.stopPropagation()}
       onPointerUp={(event) => event.stopPropagation()}
@@ -2183,6 +2184,7 @@ function Buildings3DPanel({
   open,
   view,
   markers,
+  showRnbLayer,
   rnbBuildings,
   selectedRnbBuildingId,
   detectedBuilding: _detectedBuilding,
@@ -2197,6 +2199,7 @@ function Buildings3DPanel({
   open: boolean;
   view: Buildings3DView;
   markers: Buildings3DMarker[];
+  showRnbLayer: boolean;
   rnbBuildings: RnbBuilding[];
   selectedRnbBuildingId: string | null;
   detectedBuilding: DetectedBuilding | null;
@@ -2212,6 +2215,13 @@ function Buildings3DPanel({
 
   const approximateBuildingShell = reconstructionShell;
   const routeWaypointMarkers = scanRoute?.waypointMarkers ?? [];
+  const asPolygon3DPath = (
+    path: Iterable<
+      | google.maps.LatLngAltitude
+      | google.maps.LatLngAltitudeLiteral
+      | google.maps.LatLngLiteral
+    >,
+  ) => path as unknown as string;
 
   return (
     <div className="absolute inset-0 z-0 flex flex-col overflow-hidden bg-background">
@@ -2249,8 +2259,8 @@ function Buildings3DPanel({
                 altitudeMode={
                   AltitudeMode.CLAMP_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
                 }
-                outerCoordinates={toGroundPolygonCoordinates(
-                  building.footprint,
+                path={asPolygon3DPath(
+                  toGroundPolygonCoordinates(building.footprint),
                 )}
                 fillColor={
                   isSelected
@@ -2270,7 +2280,7 @@ function Buildings3DPanel({
               altitudeMode={
                 AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
               }
-              outerCoordinates={shell.roofCoordinates}
+              path={asPolygon3DPath(shell.roofCoordinates)}
               fillColor="rgba(148, 163, 184, 0.16)"
               strokeColor="#94a3b8"
               strokeWidth={1}
@@ -2298,7 +2308,7 @@ function Buildings3DPanel({
               altitudeMode={
                 AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
               }
-              outerCoordinates={approximateBuildingShell.roofCoordinates}
+              path={asPolygon3DPath(approximateBuildingShell.roofCoordinates)}
               fillColor="rgba(20, 184, 166, 0.22)"
               strokeColor="#2dd4bf"
               strokeWidth={2}
@@ -2352,7 +2362,7 @@ function Buildings3DPanel({
             </Marker3D>
           ))}
         </Map3D>
-        {rnbBuildings.length === 0 && (
+        {showRnbLayer && rnbBuildings.length === 0 && (
           <div className="pointer-events-none absolute right-3 top-3 max-w-[260px] rounded-md border border-sky-500/25 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
             <p className="font-medium text-foreground">Bâtiments 2D</p>
             <p className="text-muted-foreground">
@@ -2945,8 +2955,9 @@ export function MapView() {
     useState(false);
   const [selectedBdTopoBuilding, setSelectedBdTopoBuilding] =
     useState<BdTopoMatchedBuilding | null>(null);
-  const [selectedBdnbBuilding, setSelectedBdnbBuilding] =
-    useState<BdnbBuildingEnrichment | null>(null);
+  const [, setSelectedBdnbBuilding] = useState<BdnbBuildingEnrichment | null>(
+    null,
+  );
   const [selectedRnbBuildingLoading, setSelectedRnbBuildingLoading] =
     useState(false);
   const [selectedBuildingScanMode, setSelectedBuildingScanMode] =
@@ -3268,22 +3279,24 @@ export function MapView() {
     setSelectedRnbBuildingLoading(false);
   }, []);
 
-  const contextShells = useMemo(
-    () =>
-      detectedBuildingCandidates
-        .filter((candidate) => candidate.id !== detectedBuilding?.id)
-        .map((candidate) => ({
-          id: candidate.id,
-          shell: buildApproximateBuildingShell(candidate, null, null),
-        }))
-        .filter(
-          (
-            candidate,
-          ): candidate is { id: string; shell: ReconstructedBuildingShell } =>
-            candidate.shell !== null,
-        ),
-    [detectedBuilding, detectedBuildingCandidates],
-  );
+  const contextShells = useMemo(() => {
+    if (!showRnbLayer && !detectedBuilding) {
+      return [] as Array<{ id: string; shell: ReconstructedBuildingShell }>;
+    }
+
+    return detectedBuildingCandidates
+      .filter((candidate) => candidate.id !== detectedBuilding?.id)
+      .map((candidate) => ({
+        id: candidate.id,
+        shell: buildApproximateBuildingShell(candidate, null, null),
+      }))
+      .filter(
+        (
+          candidate,
+        ): candidate is { id: string; shell: ReconstructedBuildingShell } =>
+          candidate.shell !== null,
+      );
+  }, [detectedBuilding, detectedBuildingCandidates, showRnbLayer]);
 
   const scanRoute3D = useMemo<Buildings3DScanRoute | null>(() => {
     const previewWaypoints = mapPreview?.waypoints ?? [];
@@ -3410,7 +3423,7 @@ export function MapView() {
   }, [detectedBuilding, selectedFacadeSegment]);
 
   useEffect(() => {
-    if (!is3D || !mainMapViewport || detectedBuilding) {
+    if (!is3D || !showRnbLayer || !mainMapViewport || detectedBuilding) {
       return;
     }
 
@@ -3475,7 +3488,7 @@ export function MapView() {
     return () => {
       cancelled = true;
     };
-  }, [detectedBuilding, is3D, mainMapViewport]);
+  }, [detectedBuilding, is3D, mainMapViewport, showRnbLayer]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -3959,7 +3972,7 @@ export function MapView() {
             setFacadeParams={setFacadeParams}
             setPencilParams={setPencilParams}
             setTemplateConfirmed={setTemplateConfirmed}
-            rnbSelectionEnabled={showRnbLayer && !is3D}
+            rnbSelectionEnabled={showRnbLayer}
             rnbBuildings={rnbBuildings}
             onSelectRnbBuilding={handleSelectRnbBuilding}
             onClearRnbSelection={handleClearSelectedBuilding}
@@ -4353,7 +4366,7 @@ export function MapView() {
             />
           ))}
 
-          {showRnbLayer && !is3D && selectedRnbCentroidPosition && (
+          {showRnbLayer && selectedRnbCentroidPosition && (
             <MarkerOverlay
               position={selectedRnbCentroidPosition}
               label="C"
@@ -4368,27 +4381,24 @@ export function MapView() {
 
         <MapSearch value={searchValue} onValueChange={setSearchValue} />
 
-        {showRnbLayer &&
-          !is3D &&
-          selectedRnbBuilding &&
-          showSelectedRnbInfo && (
-            <DraggablePanel
-              className="left-4 top-4 z-10 w-[320px]"
-              defaultPosition={{ x: 0, y: 0 }}
-              title="Bâtiment RNB"
-              onClose={handleClearSelectedBuilding}
-            >
-              <div className="p-3">
-                {buildRnbInfoWindowContent({
-                  building: selectedRnbBuilding.building,
-                  bdTopoBuilding: selectedBdTopoBuilding,
-                  threeDMarkers: buildings3DMarkers,
-                  approximateBuildingShell: reconstructionShell,
-                  loading: selectedRnbBuildingLoading,
-                })}
-              </div>
-            </DraggablePanel>
-          )}
+        {showRnbLayer && selectedRnbBuilding && showSelectedRnbInfo && (
+          <DraggablePanel
+            className="left-4 top-4 z-10 w-[320px]"
+            defaultPosition={{ x: 0, y: 0 }}
+            title="Bâtiment RNB"
+            onClose={handleClearSelectedBuilding}
+          >
+            <div className="p-3">
+              {buildRnbInfoWindowContent({
+                building: selectedRnbBuilding.building,
+                bdTopoBuilding: selectedBdTopoBuilding,
+                threeDMarkers: buildings3DMarkers,
+                approximateBuildingShell: reconstructionShell,
+                loading: selectedRnbBuildingLoading,
+              })}
+            </div>
+          </DraggablePanel>
+        )}
 
         {selectedRnbBuilding && showSelectedBuildingScanPanel && (
           <DraggablePanel
@@ -4728,6 +4738,7 @@ export function MapView() {
           open={is3D}
           view={buildings3DView}
           markers={buildings3DMarkers}
+          showRnbLayer={showRnbLayer}
           rnbBuildings={showRnbLayer ? rnbBuildings : []}
           selectedRnbBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
           detectedBuilding={detectedBuilding}
@@ -4739,7 +4750,6 @@ export function MapView() {
           facadeRecommendation={facadeRecommendation}
           onClose={() => {
             setIs3D(false);
-            setShowRnbLayer(true);
           }}
         />
 
@@ -4761,7 +4771,6 @@ export function MapView() {
             className={`px-2 py-1 text-xs rounded ${!is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
             onClick={() => {
               setIs3D(false);
-              setShowRnbLayer(true);
             }}
           >
             2D
@@ -4781,7 +4790,7 @@ export function MapView() {
           </button>
         </div>
 
-        {showRnbLayer && !is3D && rnbBuildings.length === 0 && (
+        {showRnbLayer && rnbBuildings.length === 0 && (
           <div className="absolute bottom-16 left-4 z-10 rounded-md border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-lg">
             Aucune donnée RNB visible ici. Le référentiel couvre la France.
           </div>

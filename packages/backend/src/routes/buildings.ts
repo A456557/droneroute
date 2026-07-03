@@ -8,6 +8,13 @@ interface OverpassWay {
   tags?: Record<string, string>;
 }
 
+const OVERPASS_INTERPRETER_URLS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+const OVERPASS_REQUEST_TIMEOUT_MS = 10000;
+const OVERPASS_USER_AGENT = "DroneRoute building detection/0.7";
+
 interface DetectedBuildingResponse {
   id: string;
   footprint: LatLng[];
@@ -604,17 +611,41 @@ async function fetchNearbyBuildings(
 out tags geom;
 `;
 
-  const response = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=UTF-8" },
-    body: query,
-  });
+  const failures: string[] = [];
+  let payload: { elements?: OverpassWay[] } | null = null;
 
-  if (!response.ok) {
-    throw new Error(`Overpass request failed with status ${response.status}`);
+  for (const url of OVERPASS_INTERPRETER_URLS) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain;charset=UTF-8",
+          "User-Agent": OVERPASS_USER_AGENT,
+          Accept: "application/json",
+        },
+        body: query,
+        signal: AbortSignal.timeout(OVERPASS_REQUEST_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`status ${response.status}`);
+      }
+
+      payload = (await response.json()) as { elements?: OverpassWay[] };
+      break;
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : "unknown upstream error";
+      failures.push(`${url}: ${reason}`);
+    }
   }
 
-  const payload = (await response.json()) as { elements?: OverpassWay[] };
+  if (!payload) {
+    throw new Error(
+      `Overpass upstream request failed (${failures.join(" | ")})`,
+    );
+  }
+
   const elements = Array.isArray(payload.elements) ? payload.elements : [];
 
   return elements

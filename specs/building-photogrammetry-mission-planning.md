@@ -1,8 +1,23 @@
+---
+description: Deterministic drone mission planner for building photogrammetry — generates facade, roof and oblique waypoints from a footprint, a height and a ground reference altitude.
+globs:
+  - "packages/**/mission/**"
+  - "packages/**/planners/**"
+  - "src/**/mission/**"
+alwaysApply: false
+---
+
 # Building Photogrammetry Mission Planning
 
 Generate deterministic drone waypoints for building image capture before flight.
 
-This algorithm is a mission planner, not a reconstruction pipeline. It uses the same building geometry that drives the info bubble metrics, especially polygon segment lengths and building height, to produce camera poses for facade capture, roof capture, and optional oblique coverage.
+This algorithm is a **mission planner**, not a reconstruction pipeline. It uses the same building geometry that drives the info bubble metrics — polygon segment lengths, building height and ground altitude — to produce camera poses for:
+
+- facade capture,
+- nadir roof capture,
+- optional oblique corner coverage.
+
+The planner is designed to plug into a droneroute-style app so its output can be serialized into DJI KMZ / WPML waypoint missions.
 
 ## Goal
 
@@ -10,13 +25,14 @@ Input:
 
 - A building footprint in a local cartesian system.
 - A building height.
+- A ground altitude reference (`groundZ`).
 - Camera parameters.
 - Mission overlap and standoff parameters.
 
 Output:
 
 - An ordered list of waypoints.
-- Each waypoint contains drone position and camera orientation for image capture.
+- Each waypoint contains drone position (in absolute local Z) and camera orientation for image capture.
 
 ## Scope
 
@@ -25,14 +41,16 @@ First version:
 - Ordered polygon footprint.
 - Each polygon segment is treated as one facade to inspect.
 - Constant facade distance.
-- Nadir roof grid.
+- Nadir roof grid at absolute altitude `groundZ + height + roofClearance`.
 - Optional corner oblique shots.
+- Full support for buildings whose base is not at Z = 0 via `groundZ`.
 
 Second version:
 
 - Concave polygon visibility safeguards.
 - Adaptive facade distance per side.
 - Smarter roof clipping for complex roofs or setbacks.
+- Optional terrain sampling of `groundZ` per waypoint for sloped terrain.
 
 ## Input types
 
@@ -45,6 +63,7 @@ type Point2 = {
 type Building = {
   polygon: Point2[];
   height: number;
+  groundZ?: number;
 };
 
 type Camera = {
@@ -83,26 +102,35 @@ type Waypoint = {
 };
 ```
 
+### About `groundZ`
+
+- `groundZ` is the absolute local altitude of the **base of the building** in the same coordinate system as the drone.
+- If not provided, `groundZ` defaults to `0`. This preserves backward compatibility with the first specification.
+- `building.height` remains the **relative dimension of the building** (facade height in meters).
+- All output waypoints and target points expose **absolute Z**, computed as `groundZ + relativeZ`.
+- The exporter is responsible for translating those absolute Z into the DJI `heightMode` of choice (`relativeToStartPoint`, `EGM96`, `realTimeFollowSurface`).
+
 ## Inputs derived from the info bubble
 
 The planner should use the geometry source, not the rendered HTML text, but the values exposed in the info bubble are exactly the values that drive the mission logic:
 
 - Polygon segment lengths: each segment corresponds to one facade strip to capture.
 - Building height: defines the number of vertical facade rows.
+- Ground altitude (`groundZ`): sets the absolute altitude of the building base.
 - Width, length, perimeter, and approximate area: useful for preview, QA, and roof planning summaries.
 
 Important rule:
 
 - No facade is skipped.
 - If the polygon has `N` segments, the facade planner produces `N` facade sub-missions.
-- Each facade sub-mission is parameterized by that segment length and the common building height.
+- Each facade sub-mission is parameterized by that segment length, the common building height and the common ground altitude.
 
 ## Assumptions
 
 - Coordinates are already projected into a local metric coordinate system.
 - Polygon vertices are ordered around the footprint.
 - The drone can hold position and yaw accurately enough for the requested overlap.
-- Altitude reference is local ground level at the building base.
+- Altitude reference is a single scalar `groundZ` per building (V1).
 - Camera optical axis is aligned with gimbal pitch and aircraft yaw.
 - Lens distortion is either negligible for planning or handled elsewhere.
 
@@ -114,6 +142,7 @@ The planning choices below follow standard photogrammetry capture principles:
 - Combine horizontal facade imagery with nadir roof imagery.
 - Add oblique corner shots when stronger tie points are needed at roof-wall transitions.
 - Keep camera intrinsics stable during one mission.
+- Keep positional altitude consistent thanks to `groundZ`, so exported KMZ files stay meaningful regardless of takeoff point.
 - If execution hardware supports RTK or PPK, positional accuracy improves, but that is outside the planner itself.
 
 ## Camera geometry
@@ -162,23 +191,55 @@ $$
 
 This is used horizontally and vertically on facades and on both roof grid axes.
 
+## Altitude convention
+
+The planner distinguishes between two altitude concepts:
+
+- **Relative Z** (`zRelative`): height above the building base, in `[0, building.height]`.
+- **Absolute Z** (`z`): height in the local coordinate frame, equal to `groundZ + zRelative`.
+
+Only **absolute Z** ever leaves the planner. All `Waypoint.z` and `Waypoint.target.z` values are absolute.
+
+Key derived altitudes:
+
+$$
+roofZ = groundZ + height
+$$
+
+$$
+flightZ_{roof} = groundZ + height + roofClearance
+$$
+
+$$
+z_{facade}(row) = groundZ + zRelative(row)
+$$
+
+$$
+z_{oblique,cam} = groundZ + 0.7 \cdot height
+$$
+
+$$
+z_{oblique,target} = groundZ + 0.75 \cdot height
+$$
+
 ## Output orientation convention
 
 - `yawDeg`: aircraft heading in degrees, where the drone faces the target point.
 - `pitchDeg`: gimbal pitch in degrees.
-- `0` means horizontal.
-- `-90` means nadir.
+  - `0` means horizontal.
+  - `-90` means nadir.
 - `rollDeg`: always `0` in this planner.
 
 ## High-level strategy
 
 1. Normalize the footprint.
-2. Derive facade capture strips from each polygon edge.
-3. Derive a nadir roof grid over the footprint bounding box or a rotated rectangle frame.
-4. Optionally add corner oblique shots.
-5. Order the waypoints to reduce transit distance.
+2. Resolve `groundZ` (default `0`).
+3. Derive facade capture strips from each polygon edge, using absolute Z.
+4. Derive a nadir roof grid over the footprint, using absolute Z.
+5. Optionally add corner oblique shots, using absolute Z.
+6. Order the waypoints to reduce transit distance.
 
-In other words, the footprint segments shown in the info bubble are not just display metrics. They are the facade mission primitives.
+In other words, the footprint segments shown in the info bubble are not just display metrics. They are the facade mission primitives, and `groundZ` is the vertical anchor that keeps the mission grounded in the drone's coordinate frame.
 
 ## Core reusable helpers
 
@@ -224,6 +285,14 @@ function yawToTargetDeg(from: Point2, to: Point2): number {
 function pitchToTargetDeg(horizontalDistance: number, dz: number): number {
   return (Math.atan2(dz, horizontalDistance) * 180) / Math.PI;
 }
+
+function resolveGroundZ(building: Building): number {
+  return building.groundZ ?? 0;
+}
+
+function resolveRoofZ(building: Building): number {
+  return resolveGroundZ(building) + building.height;
+}
 ```
 
 ## Facade planning
@@ -234,20 +303,13 @@ Each edge is one facade.
 
 If the building polygon contains `N` ordered segments, the planner generates `N` facade capture groups. This is the key revision of the planner: facade inspection is not a generic orbit around the building, but a deterministic per-facade scan derived from the segment lengths already exposed to the user.
 
-For each edge:
-
-1. Compute the edge tangent.
-2. Compute the outward normal.
-3. Offset the camera track by `facadeDistance` along that outward normal.
-4. Create a horizontal strip of shots along the offset segment.
-5. Repeat vertically across several altitude bands until the facade is covered.
-
-### Using segment lengths and building height
+### Using segment lengths, building height and groundZ
 
 For facade `i`:
 
 - `L_i` is the length of polygon segment `i`.
 - `H` is `building.height`.
+- `Z_0 = groundZ` is the base altitude of the building.
 
 At facade distance `d`, compute visible image width and height on the facade plane:
 
@@ -281,19 +343,11 @@ $$
 rows = \max\left(1, \left\lceil\frac{\max(0, H - coverageZ_i)}{stepZ_i}\right\rceil + 1\right)
 $$
 
-The number of facade waypoints for that side is:
+Row altitudes are computed relative to the base, then shifted:
 
 $$
-facadeWaypointCount_i = cols_i \cdot rows
+zAbsolute_j = groundZ + zRelative_j
 $$
-
-Total facade waypoints over the full building are:
-
-$$
-facadeWaypointCountTotal = \sum_{i=1}^{N} facadeWaypointCount_i
-$$
-
-This is the direct link between the info bubble dimensions and the generated mission.
 
 ### Choosing the outward normal
 
@@ -321,44 +375,47 @@ $$
 
 ### Facade altitude bands
 
-To cover a facade of height `building.height`, place camera heights so the visible vertical windows overlap and cover from near ground to roofline.
+To cover a facade of height `building.height`, place camera heights so the visible vertical windows overlap and cover from base to roofline.
 
-Recommended band centers:
-
-$$
-z_0 = \frac{coverageZ(d)}{2}
-$$
+Recommended relative band centers:
 
 $$
-z_n = z_0 + n \cdot facadeStepZ
+zRel_0 = \frac{coverageZ(d)}{2}
+$$
+
+$$
+zRel_n = zRel_0 + n \cdot facadeStepZ
 $$
 
 Continue until the top of the last window exceeds building height.
 
-Clamp the first and last rows so that:
+Absolute band centers are then:
 
-- The lowest frame still sees the lower facade.
-- The highest frame reaches slightly above the roofline.
+$$
+z_n = groundZ + zRel_n
+$$
+
+Clamp so that:
+
+- The lowest frame still sees the lower facade (`z_n >= groundZ`).
+- The highest frame reaches slightly above the roofline (`z_n <= roofZ + small tolerance`).
 
 Recommended implementation detail:
 
 - Compute row centers from the formula above.
 - Then re-center the row sequence so the first and last image footprints are balanced against the bottom and top of the facade.
-- This avoids leaving a thin uncovered strip near the ground or near the roof parapet.
 
 ### Facade target point
 
-For a waypoint at horizontal sample `s` on edge `AB` and altitude `z`, point the camera to the corresponding point on the wall plane:
+For a waypoint at horizontal sample `s` on edge `AB` and absolute altitude `z_abs`, point the camera to the corresponding point on the wall plane:
 
 - Target XY is the projection back from the camera to the original edge sample.
-- Target Z is clamped into `[0, building.height]`.
+- Target Z is clamped into `[groundZ, groundZ + building.height]`.
 
 This yields:
 
 - `yawDeg` toward the facade sample.
-- `pitchDeg` toward the target point.
-
-For standard facade inspection, the default target is the center of the local photo window on that wall. That keeps each image approximately orthogonal to the facade and makes overlap easier to predict.
+- `pitchDeg` toward the target point (typically near `0°` for a well-centered row).
 
 ### Facade pseudocode
 
@@ -370,10 +427,16 @@ function planFacadeWaypoints(
 ): Waypoint[] {
   const waypoints: Waypoint[] = [];
   const winding = signedPolygonArea(building.polygon) >= 0 ? "ccw" : "cw";
+
+  const groundZ = resolveGroundZ(building);
+  const roofZ = resolveRoofZ(building);
+
   const fovX = 2 * Math.atan(camera.sensorWidthMm / (2 * camera.focalMm));
   const fovY = 2 * Math.atan(camera.sensorHeightMm / (2 * camera.focalMm));
+
   const coverageX = 2 * params.facadeDistance * Math.tan(fovX / 2);
   const coverageZ = 2 * params.facadeDistance * Math.tan(fovY / 2);
+
   const stepX = Math.max(coverageX * (1 - params.facadeOverlapX), 0.5);
   const stepZ = Math.max(coverageZ * (1 - params.facadeOverlapZ), 0.5);
 
@@ -382,6 +445,7 @@ function planFacadeWaypoints(
     const b = building.polygon[(index + 1) % building.polygon.length];
     const edgeLength = distance2D(a, b);
     const tangent = normalize(b.x - a.x, b.y - a.y);
+
     const normal =
       winding === "ccw"
         ? { x: tangent.y, y: -tangent.x }
@@ -392,36 +456,49 @@ function planFacadeWaypoints(
       coverageX,
       stepX,
     );
-    const altitudeSamples = sampleCenteredFacadeAltitudes(
+
+    const altitudeSamplesRelative = sampleCenteredFacadeAltitudes(
       building.height,
       coverageZ,
       stepZ,
     );
 
-    for (let rowIndex = 0; rowIndex < altitudeSamples.length; rowIndex += 1) {
-      const z = altitudeSamples[rowIndex];
+    for (
+      let rowIndex = 0;
+      rowIndex < altitudeSamplesRelative.length;
+      rowIndex += 1
+    ) {
+      const zRelative = altitudeSamplesRelative[rowIndex];
+      const zAbsolute = groundZ + zRelative;
+
       for (
         let columnIndex = 0;
         columnIndex < horizontalSamples.length;
         columnIndex += 1
       ) {
         const s = horizontalSamples[columnIndex];
+
         const wallPoint = {
           x: a.x + tangent.x * s,
           y: a.y + tangent.y * s,
         };
+
         const cameraPoint = {
           x: wallPoint.x + normal.x * params.facadeDistance,
           y: wallPoint.y + normal.y * params.facadeDistance,
         };
-        const targetZ = z;
+
+        const targetZ = clamp(zAbsolute, groundZ, roofZ);
         const yawDeg = yawToTargetDeg(cameraPoint, wallPoint);
-        const pitchDeg = pitchToTargetDeg(params.facadeDistance, targetZ - z);
+        const pitchDeg = pitchToTargetDeg(
+          params.facadeDistance,
+          targetZ - zAbsolute,
+        );
 
         waypoints.push({
           x: cameraPoint.x,
           y: cameraPoint.y,
-          z,
+          z: zAbsolute,
           yawDeg,
           pitchDeg,
           rollDeg: 0,
@@ -433,8 +510,11 @@ function planFacadeWaypoints(
             edgeLength,
             rowIndex,
             columnIndex,
+            zRelative,
+            groundZ,
+            roofZ,
             facadeWaypointCount:
-              horizontalSamples.length * altitudeSamples.length,
+              horizontalSamples.length * altitudeSamplesRelative.length,
           },
         });
       }
@@ -452,16 +532,15 @@ The default facade inspection mode is intentionally simple and robust:
 - one capture matrix per segment,
 - constant standoff distance per segment,
 - near-orthogonal viewing direction to the wall,
+- absolute Z anchored on `groundZ`,
 - serpentine traversal inside each facade.
-
-A more advanced variant can tilt the first and last rows slightly to increase bottom-edge and roof-edge robustness, but the base mission should already cover every facade from segment length and height alone.
 
 ## Roof planning
 
-Roof coverage is generated as a nadir grid at altitude:
+Roof coverage is generated as a nadir grid at absolute altitude:
 
 $$
-roofAltitude = building.height + roofClearance
+flightZ_{roof} = groundZ + height + roofClearance
 $$
 
 ### Roof footprint frame
@@ -500,12 +579,20 @@ function planRoofWaypoints(
   params: MissionParams,
 ): Waypoint[] {
   const roofWaypoints: Waypoint[] = [];
+
+  const groundZ = resolveGroundZ(building);
+  const roofZ = resolveRoofZ(building);
+  const flightZ = roofZ + params.roofClearance;
+
   const fovX = 2 * Math.atan(camera.sensorWidthMm / (2 * camera.focalMm));
   const fovY = 2 * Math.atan(camera.sensorHeightMm / (2 * camera.focalMm));
+
   const coverageX = 2 * params.roofClearance * Math.tan(fovX / 2);
   const coverageY = 2 * params.roofClearance * Math.tan(fovY / 2);
+
   const stepX = Math.max(coverageX * (1 - params.roofSideOverlap), 0.5);
   const stepY = Math.max(coverageY * (1 - params.roofFrontOverlap), 0.5);
+
   const frame = computeRoofPlanningFrame(building.polygon);
   const samples = sampleFrameGrid(frame, stepX, stepY);
 
@@ -517,13 +604,14 @@ function planRoofWaypoints(
     roofWaypoints.push({
       x: sample.x,
       y: sample.y,
-      z: building.height + params.roofClearance,
+      z: flightZ,
       yawDeg: frame.primaryAxisYawDeg,
       pitchDeg: -90,
       rollDeg: 0,
       capture: true,
-      target: { x: sample.x, y: sample.y, z: building.height },
+      target: { x: sample.x, y: sample.y, z: roofZ },
       kind: "roof",
+      metadata: { groundZ, roofZ, flightZ },
     });
   }
 
@@ -539,7 +627,7 @@ Recommended first version:
 
 - One shot per exterior corner.
 - Camera positioned outside the corner bisector.
-- Altitude around `0.6 * building.height` to `0.8 * building.height`.
+- Absolute altitude around `groundZ + 0.7 * height`.
 - Gimbal pitched toward the upper facade and roof edge, typically between `-20` and `-45` degrees.
 
 ### Corner placement
@@ -549,7 +637,7 @@ At each corner vertex:
 1. Compute the two outward normals of adjacent edges.
 2. Sum and normalize them to form an outward bisector.
 3. Offset the camera from the corner by `facadeDistance` to `1.5 * facadeDistance`.
-4. Aim at a target point near the corner at height `0.75 * building.height`.
+4. Aim at a target point near the corner at absolute altitude `groundZ + 0.75 * height`.
 
 ### Oblique pseudocode
 
@@ -561,6 +649,8 @@ function planObliqueWaypoints(
   const waypoints: Waypoint[] = [];
   const winding = signedPolygonArea(building.polygon) >= 0 ? "ccw" : "cw";
 
+  const groundZ = resolveGroundZ(building);
+
   for (let index = 0; index < building.polygon.length; index += 1) {
     const prev =
       building.polygon[
@@ -568,47 +658,53 @@ function planObliqueWaypoints(
       ];
     const current = building.polygon[index];
     const next = building.polygon[(index + 1) % building.polygon.length];
+
     const inA = normalize(current.x - prev.x, current.y - prev.y);
     const inB = normalize(next.x - current.x, next.y - current.y);
+
     const outwardA =
       winding === "ccw" ? { x: inA.y, y: -inA.x } : { x: -inA.y, y: inA.x };
     const outwardB =
       winding === "ccw" ? { x: inB.y, y: -inB.x } : { x: -inB.y, y: inB.x };
+
     const bisector = normalize(
       outwardA.x + outwardB.x,
       outwardA.y + outwardB.y,
     );
+
     const radius = params.facadeDistance * 1.25;
+
     const cameraPoint = {
       x: current.x + bisector.x * radius,
       y: current.y + bisector.y * radius,
     };
+
+    const cameraZ = groundZ + building.height * 0.7;
+
     const target = {
       x: current.x,
       y: current.y,
-      z: building.height * 0.75,
+      z: groundZ + building.height * 0.75,
     };
+
     const yawDeg = yawToTargetDeg(cameraPoint, current);
     const horizontalDistance = Math.hypot(
       target.x - cameraPoint.x,
       target.y - cameraPoint.y,
     );
-    const pitchDeg = pitchToTargetDeg(
-      horizontalDistance,
-      target.z - building.height * 0.7,
-    );
+    const pitchDeg = pitchToTargetDeg(horizontalDistance, target.z - cameraZ);
 
     waypoints.push({
       x: cameraPoint.x,
       y: cameraPoint.y,
-      z: building.height * 0.7,
+      z: cameraZ,
       yawDeg,
       pitchDeg,
       rollDeg: 0,
       capture: true,
       target,
       kind: "oblique",
-      metadata: { cornerIndex: index },
+      metadata: { cornerIndex: index, groundZ },
     });
   }
 
@@ -667,6 +763,7 @@ Implementation approach:
 2. Use the two long sides and two short sides as facade edges.
 3. Use the rectangle center and orientation as the roof planning frame.
 4. Generate four corner obliques if enabled.
+5. Confirm all four facade groups share the same `groundZ`.
 
 Benefits:
 
@@ -679,13 +776,11 @@ Benefits:
 
 For arbitrary polygons, generate facade strips independently per edge.
 
-This is the default planning model for facade inspection.
-
 Each ordered segment in the building footprint is one facade unit:
 
 1. read its length,
 2. compute its column count,
-3. reuse the building height to compute the row count,
+3. reuse the building height and `groundZ` to compute row absolute altitudes,
 4. emit a local waypoint matrix for that facade,
 5. move to the next segment.
 
@@ -696,7 +791,7 @@ Additional safeguards:
 - Reject camera positions that fall inside the footprint.
 - For concave polygons, test line of sight from camera point to wall target and drop clearly obstructed shots.
 
-Recommended metadata per waypoint should always retain the `edgeIndex` so the UI can say which facade a photo belongs to.
+Recommended metadata per waypoint should always retain the `edgeIndex` and `groundZ` so the UI can say which facade a photo belongs to and at which absolute altitude it flies.
 
 ## Validation rules
 
@@ -706,13 +801,14 @@ Reject or adjust invalid inputs early.
 - `height > 0`
 - `facadeDistance > 0`
 - `roofClearance > 0`
+- `groundZ`, if provided, must be a finite number (positive or negative)
 - overlaps must satisfy `0 <= overlap < 1`
 - camera dimensions and focal length must be positive
 
 Useful clamps:
 
 - minimum horizontal and vertical step of `0.5 m`
-- minimum facade altitude of `1.5 m` if ground clearance is required
+- minimum facade absolute altitude of `groundZ + 1.5 m` if ground clearance is required
 - optional maximum mission point count to avoid pathological outputs
 
 ## Recommended metadata on each waypoint
@@ -727,23 +823,44 @@ type WaypointMetadata = {
   columnIndex?: number;
   cornerIndex?: number;
   stripLengthM?: number;
+  zRelative?: number;
+  groundZ?: number;
+  roofZ?: number;
+  flightZ?: number;
   source: "building-photogrammetry";
 };
 ```
 
 ## Example mission flow
 
-For a polygonal building with `height = 18 m`:
+For a polygonal building with `height = 18 m` and `groundZ = 152 m`:
 
 1. Read every polygon segment length from the same geometry used to populate the info bubble.
 2. Treat every segment as one facade to inspect.
 3. For each facade, compute a horizontal photo count from segment length and facade overlap.
 4. Compute a common vertical photo count from building height and vertical overlap.
-5. Generate a local waypoint matrix for that facade.
-6. Repeat facade by facade until all wall segments are covered.
-7. Generate a nadir roof grid at `18 + roofClearance`.
-8. Add corner oblique shots if enabled.
-9. Order all points serpentine by facade, then by row.
+5. Convert every row altitude to absolute Z by adding `groundZ`.
+6. Generate a local waypoint matrix for that facade.
+7. Repeat facade by facade until all wall segments are covered.
+8. Generate a nadir roof grid at absolute altitude `152 + 18 + roofClearance`.
+9. Add corner oblique shots at absolute altitude `152 + 0.7 * 18`.
+10. Order all points serpentine by facade, then by row.
+
+## Interaction with the KMZ / WPML exporter
+
+The planner emits **absolute Z** in the local frame. The droneroute exporter is expected to convert those absolute altitudes into DJI-compatible altitudes according to the selected mission `heightMode`:
+
+- `relativeToStartPoint`: `droneZ = z - takeoffZ`
+- `EGM96` / `WGS84`: `droneZ = z + geoidCorrection`
+- `realTimeFollowSurface`: `droneZ = z - terrainZ(x, y)`
+
+Because the planner is deterministic and altitude-agnostic beyond `groundZ`, the same mission can be re-exported for different `heightMode` values without regenerating waypoints.
+
+## Backward compatibility
+
+- Calls that omit `groundZ` behave exactly like the previous specification (`groundZ = 0`).
+- Existing snapshot tests continue to pass unchanged.
+- A new test suite is required to verify that setting `groundZ = k` produces waypoints identical to the reference mission except for a constant `+k` offset on every `z` and every `target.z`.
 
 ## Why this algorithm is reusable
 
@@ -751,7 +868,8 @@ For a polygonal building with `height = 18 m`:
 - It separates facade, roof, and oblique generators.
 - It works in any projected local coordinate system.
 - It maps naturally from user-visible building metrics to mission waypoints.
-- It can later emit DJI waypoints, app-specific mission points, or preview-only camera poses.
+- It anchors altitudes on `groundZ` so missions stay valid on sloped or elevated terrain.
+- It can later emit DJI KMZ / WPML, app-specific mission points, or preview-only camera poses.
 
 ## Suggested next implementation step
 
@@ -763,6 +881,8 @@ Implement these pure functions in a geometry-focused module:
 - `planObliqueWaypoints`
 - `computeRoofPlanningFrame`
 - `pointInPolygon`
+- `resolveGroundZ`
+- `resolveRoofZ`
 - `optimizeMissionOrder`
 
-That keeps the planner deterministic, testable, and independent from map rendering or flight export.
+That keeps the planner deterministic, testable, and independent from map rendering or KMZ export.

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useMap } from "@vis.gl/react-google-maps";
+import { AdvancedMarker, useMap } from "@vis.gl/react-google-maps";
 
 type LatLngLiteral = google.maps.LatLngLiteral;
 
@@ -18,12 +18,89 @@ interface MarkerOverlayProps {
   onDragEnd?: (position: LatLngLiteral) => void;
 }
 
-function resolveSymbolPath(
-  path: google.maps.SymbolPath | "arrow" | "circle" | undefined,
-): google.maps.SymbolPath {
-  if (path === "arrow") return google.maps.SymbolPath.BACKWARD_CLOSED_ARROW;
-  if (path === "circle" || path == null) return google.maps.SymbolPath.CIRCLE;
-  return path;
+function buildSvgContent(opts: {
+  fillColor: string;
+  strokeColor: string;
+  scale: number;
+  label?: string;
+  iconPath?: google.maps.SymbolPath | "arrow" | "circle";
+  onRightClick?: (event: google.maps.MapMouseEvent) => void;
+}): React.ReactElement {
+  const { fillColor, strokeColor, scale, label, iconPath, onRightClick } = opts;
+  const onCtx = onRightClick
+    ? () => onRightClick({} as google.maps.MapMouseEvent)
+    : undefined;
+  const size = scale * 2;
+
+  if (iconPath === "arrow") {
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        width={size}
+        height={size}
+        viewBox="-1 -1 2 2"
+        style={{ display: "block" }}
+        onContextMenu={
+          onCtx
+            ? (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onCtx();
+              }
+            : undefined
+        }
+      >
+        <polygon
+          points="0,-1 0.7,0.7 0,0.3 -0.7,0.7"
+          fill={fillColor}
+          stroke={strokeColor}
+          strokeWidth="0.1"
+        />
+      </svg>
+    );
+  }
+
+  // Default: circle with optional label
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      style={{ display: "block" }}
+      onContextMenu={
+        onCtx
+          ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onCtx();
+            }
+          : undefined
+      }
+    >
+      <circle
+        cx="10"
+        cy="10"
+        r="9"
+        fill={fillColor}
+        stroke={strokeColor}
+        strokeWidth="2"
+      />
+      {label && (
+        <text
+          x="10"
+          y="14"
+          textAnchor="middle"
+          fill="#ffffff"
+          fontSize="9"
+          fontWeight="700"
+          fontFamily="sans-serif"
+        >
+          {label}
+        </text>
+      )}
+    </svg>
+  );
 }
 
 export function MarkerOverlay({
@@ -40,106 +117,35 @@ export function MarkerOverlay({
   onRightClick,
   onDragEnd,
 }: MarkerOverlayProps) {
-  const map = useMap();
-  const markerRef = useRef<google.maps.Marker | null>(null);
-
-  useEffect(() => {
-    if (!map) return;
-
-    const marker = new google.maps.Marker({
-      map,
-      position,
-      title,
-      draggable,
-      zIndex,
-      label: label
-        ? {
-            text: label,
-            color: "#ffffff",
-            fontSize: "11px",
-            fontWeight: "700",
-          }
-        : undefined,
-      icon: {
-        path: resolveSymbolPath(iconPath),
+  return (
+    <AdvancedMarker
+      position={position}
+      title={title}
+      draggable={draggable}
+      clickable={!!onClick}
+      zIndex={zIndex}
+      anchorPoint={["50%", "50%"]}
+      onClick={onClick}
+      onDragEnd={
+        onDragEnd
+          ? (e) => {
+              if (e.latLng) {
+                onDragEnd({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+              }
+            }
+          : undefined
+      }
+    >
+      {buildSvgContent({
         fillColor,
-        fillOpacity: 1,
         strokeColor,
-        strokeOpacity: 1,
-        strokeWeight: 2,
         scale,
-      },
-    });
-
-    markerRef.current = marker;
-    return () => {
-      marker.setMap(null);
-      markerRef.current = null;
-    };
-  }, [map]);
-
-  useEffect(() => {
-    const marker = markerRef.current;
-    if (!marker) return;
-    marker.setPosition(position);
-    marker.setTitle(title ?? "");
-    marker.setDraggable(draggable);
-    marker.setZIndex(zIndex ?? undefined);
-    marker.setLabel(
-      label
-        ? {
-            text: label,
-            color: "#ffffff",
-            fontSize: "11px",
-            fontWeight: "700",
-          }
-        : null,
-    );
-    marker.setIcon({
-      path: resolveSymbolPath(iconPath),
-      fillColor,
-      fillOpacity: 1,
-      strokeColor,
-      strokeOpacity: 1,
-      strokeWeight: 2,
-      scale,
-    });
-  }, [
-    position,
-    title,
-    label,
-    fillColor,
-    strokeColor,
-    scale,
-    draggable,
-    zIndex,
-    iconPath,
-  ]);
-
-  useEffect(() => {
-    const marker = markerRef.current;
-    if (!marker) return;
-
-    const listeners: google.maps.MapsEventListener[] = [];
-    if (onClick) listeners.push(marker.addListener("click", onClick));
-    if (onRightClick)
-      listeners.push(marker.addListener("rightclick", onRightClick));
-    if (onDragEnd) {
-      listeners.push(
-        marker.addListener("dragend", () => {
-          const point = marker.getPosition();
-          if (!point) return;
-          onDragEnd({ lat: point.lat(), lng: point.lng() });
-        }),
-      );
-    }
-
-    return () => {
-      for (const listener of listeners) listener.remove();
-    };
-  }, [onClick, onRightClick, onDragEnd]);
-
-  return null;
+        label,
+        iconPath,
+        onRightClick,
+      })}
+    </AdvancedMarker>
+  );
 }
 
 interface PolylineOverlayProps {

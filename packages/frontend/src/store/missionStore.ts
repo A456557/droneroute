@@ -115,7 +115,8 @@ interface MissionState {
   setDirty: (dirty: boolean) => void;
 }
 
-export const useMissionStore = create<MissionState>((set, get) => ({
+export const useMissionStore = create<MissionState>((set, _get) => ({
+  // Keep _get to preserve the Zustand factory signature without lint noise.
   missionId: null,
   missionName: "New Mission",
   dirty: false,
