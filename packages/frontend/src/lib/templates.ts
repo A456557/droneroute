@@ -158,7 +158,7 @@ export const MISSION_PLANNER_3D_GRID_PARAMS: Pick<
 
 export const DEFAULT_FACADE_PARAMS: Omit<FacadeParams, "point1" | "point2"> = {
   distanceM: 20,
-  minAltitude: 10,
+  minAltitude: 1,
   maxAltitude: 30,
   numRows: 4,
   numColumns: 8,
@@ -175,12 +175,35 @@ export const MISSION_PLANNER_VERTICAL_FACADE_PARAMS: Pick<
   | "addPhotos"
 > = {
   distanceM: 18,
-  minAltitude: 8,
+  minAltitude: 1,
   maxAltitude: 36,
   numRows: 5,
   numColumns: 7,
   addPhotos: true,
 };
+
+export function computeFacadeAltitudes(
+  minAltitude: number,
+  maxAltitude: number,
+  numRows: number,
+): number[] {
+  const rows = Math.max(1, Math.round(numRows));
+  const [low, high] =
+    minAltitude <= maxAltitude
+      ? [minAltitude, maxAltitude]
+      : [maxAltitude, minAltitude];
+
+  if (rows === 1) {
+    return [Math.round(low)];
+  }
+
+  return Array.from({ length: rows }, (_, row) => {
+    if (row === 0) return Math.round(low);
+    if (row === rows - 1) return Math.round(high);
+    const fraction = row / (rows - 1);
+    return Math.round(low + fraction * (high - low));
+  });
+}
 
 export const MISSION_PLANNER_DENSE_FACADE_PARAMS: Pick<
   FacadeParams,
@@ -192,7 +215,7 @@ export const MISSION_PLANNER_DENSE_FACADE_PARAMS: Pick<
   | "addPhotos"
 > = {
   distanceM: 12,
-  minAltitude: 8,
+  minAltitude: 1,
   maxAltitude: 42,
   numRows: 7,
   numColumns: 11,
@@ -410,17 +433,18 @@ export function generateFacade(params: FacadeParams): TemplateResult {
   // Perpendicular: offset 90° to the right of the wall direction
   const offsetBearing = (wallBearing + 90) % 360;
 
+  const rows = Math.max(1, Math.round(numRows));
+  const columns = Math.max(1, Math.round(numColumns));
+  const altitudes = computeFacadeAltitudes(minAltitude, maxAltitude, rows);
+
   // Generate the scan grid along the wall
-  for (let row = 0; row < numRows; row++) {
-    const altFraction = numRows <= 1 ? 0 : row / (numRows - 1);
-    const alt = Math.round(
-      minAltitude + altFraction * (maxAltitude - minAltitude),
-    );
+  for (let row = 0; row < rows; row++) {
+    const alt = altitudes[row];
     const reverse = row % 2 === 1; // zigzag
 
-    for (let col = 0; col < numColumns; col++) {
-      const colIdx = reverse ? numColumns - 1 - col : col;
-      const colFraction = numColumns <= 1 ? 0 : colIdx / (numColumns - 1);
+    for (let col = 0; col < columns; col++) {
+      const colIdx = reverse ? columns - 1 - col : col;
+      const colFraction = columns <= 1 ? 0 : colIdx / (columns - 1);
 
       // Point along the wall
       const wallLat = lat1 + colFraction * (lat2 - lat1);

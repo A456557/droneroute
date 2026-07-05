@@ -553,7 +553,7 @@ export function TemplateConfigPanel({
                   maxAltitude: Math.max(metricV + 5, facadeParams.maxAltitude),
                 });
               }}
-              min={2}
+              min={1}
               step={5}
               fallback={10}
               className="h-7 text-xs"

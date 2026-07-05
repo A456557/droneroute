@@ -7,10 +7,17 @@ import {
   Map3D,
   MapMode,
   Marker3D,
-  Pin,
   RenderingType,
   useMap,
 } from "@vis.gl/react-google-maps";
+import MapGL, {
+  Source,
+  Layer,
+  Marker as GLMarker,
+  Popup,
+} from "react-map-gl/mapbox";
+import maplibregl from "maplibre-gl";
+import { RnbBuildingsLayer2D, MapInteraction2D } from "./reactMapOverlays";
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
@@ -459,7 +466,7 @@ function buildBuildingScanFacadeParams(
     distanceM,
     minAltitude: 8,
     maxAltitude: Math.round(
-      clamp(heightM + (density === "dense" ? 12 : 8), 24, 100),
+      clamp(heightM + (density === "dense" ? 12 : 8), 1, 100),
     ),
     numRows,
     numColumns,
@@ -1394,7 +1401,7 @@ function buildReconstructionPresets(
               distanceM: facadeDistanceM,
               minAltitude: Math.max(
                 MISSION_PLANNER_VERTICAL_FACADE_PARAMS.minAltitude,
-                6,
+                1,
               ),
               maxAltitude: Math.round(clamp(estimatedHeightM + 8, 20, 90)),
               numRows: facadeRows,
@@ -1422,7 +1429,7 @@ function buildReconstructionPresets(
               distanceM: denseFacadeDistanceM,
               minAltitude: Math.max(
                 MISSION_PLANNER_DENSE_FACADE_PARAMS.minAltitude,
-                6,
+                1,
               ),
               maxAltitude: Math.round(clamp(estimatedHeightM + 12, 24, 100)),
               numRows: denseFacadeRows,
@@ -3919,13 +3926,171 @@ export function MapView() {
     setShowSelectedBuildingScanPanel(true);
   }, [selectedRnbBuilding]);
 
-  if (!googleMapsApiKey) {
+  // If 3D is requested, prefer Google Maps (requires API key). For 2D we use
+  // an open MapLibre/Mapbox GL view with OpenStreetMap raster tiles.
+  const showGoogle3D = is3D;
+
+  if (showGoogle3D && !googleMapsApiKey) {
     return (
       <div className="relative h-full w-full flex items-center justify-center bg-background text-muted-foreground">
         <p>
           Google Maps API key not configured. Add GOOGLE_MAPS_API_KEY or
-          VITE_GOOGLE_MAPS_API_KEY to your environment.
+          VITE_GOOGLE_MAPS_API_KEY to your environment to enable 3D view.
         </p>
+      </div>
+    );
+  }
+
+  // Prepare a minimal Mapbox style using OpenStreetMap raster tiles
+  const osmStyle = {
+    version: 8,
+    sources: {
+      osm: {
+        type: "raster",
+        tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        tileSize: 256,
+      },
+    },
+    layers: [
+      {
+        id: "osm-tiles",
+        type: "raster",
+        source: "osm",
+      },
+    ],
+  } as any;
+
+  // GeoJSON for route and points (used in 2D OSM view)
+  const routeGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates: waypoints.map((w) => [w.longitude, w.latitude]),
+          },
+        },
+      ],
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [waypoints]);
+
+  const pointsGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: waypoints.map((w) => ({
+        type: "Feature",
+        properties: { index: w.index },
+        geometry: { type: "Point", coordinates: [w.longitude, w.latitude] },
+      })),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [waypoints]);
+
+  if (!showGoogle3D) {
+    const mapRef = useRef<any>(null);
+    return (
+      <div className="relative h-full w-full">
+        <MapGL
+          ref={mapRef}
+          initialViewState={{
+            longitude: defaultMapView.longitude,
+            latitude: defaultMapView.latitude,
+            zoom: defaultMapView.zoom,
+          }}
+          mapLib={maplibregl}
+          mapStyle={osmStyle}
+          style={{ width: "100%", height: "100%" }}
+        >
+          <Source id="route" type="geojson" data={routeGeo}>
+            <Layer
+              id="route-line"
+              type="line"
+              paint={{
+                "line-color": "#f59e0b",
+                "line-width": 4,
+              }}
+            />
+          </Source>
+          <Source id="points" type="geojson" data={pointsGeo}>
+            <Layer
+              id="points-circle"
+              type="circle"
+              paint={{
+                "circle-radius": 6,
+                "circle-color": "#2563eb",
+                "circle-stroke-color": "#fff",
+                "circle-stroke-width": 1,
+              }}
+            />
+          </Source>
+
+          {/* 2D overlays and interaction adapted for MapLibre */}
+          <RnbBuildingsLayer2D
+            enabled={showRnbLayer}
+            buildings={rnbBuildings}
+            selectedBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
+            onBuildingsChange={setRnbBuildings}
+            onSelectBuilding={handleSelectRnbBuilding}
+            mapRef={mapRef}
+          />
+
+          <MapInteraction2D
+            mapRef={mapRef}
+            targetTilt={is3D ? (mapTypeId === HYBRID_TYPE ? 67.5 : 45) : 0}
+            templateMode={templateMode}
+            dragState={dragState}
+            setDragState={setDragState}
+            rawPath={rawPath}
+            setRawPath={setRawPath}
+            setOrbitParams={setOrbitParams}
+            setGridParams={setGridParams}
+            setFacadeParams={setFacadeParams}
+            setPencilParams={setPencilParams}
+            setTemplateConfirmed={setTemplateConfirmed}
+            rnbSelectionEnabled={showRnbLayer}
+            rnbBuildings={rnbBuildings}
+            onSelectRnbBuilding={handleSelectRnbBuilding}
+            onClearRnbSelection={handleClearSelectedBuilding}
+          />
+
+          {/* Waypoint markers */}
+          {waypoints.map((wp, i) => (
+            <GLMarker
+              key={`wp-${i}`}
+              longitude={wp.longitude}
+              latitude={wp.latitude}
+              anchor="center"
+            >
+              <div
+                title={`${wp.name}\nAlt: ${wp.height}m`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <div
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 9,
+                    background: "#f59e0b",
+                    border: "2px solid #7c2d12",
+                    color: "#fff",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  {i + 1}
+                </div>
+              </div>
+            </GLMarker>
+          ))}
+        </MapGL>
       </div>
     );
   }
