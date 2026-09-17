@@ -789,18 +789,29 @@ async function fetchBdnbBuildingEnrichment(
     return null;
   }
 
+  // Query enrichment tables independently: a missing/renamed table (or any
+  // other BDNB hiccup) must degrade to partial data, never fail the request.
   const [ffoRows, argilesRows, dpeRows] = await Promise.all([
     fetchBdnbRows("batiment_groupe_ffo_bat", {
       limit: "1",
       batiment_groupe_id: `eq.${batimentGroupeId}`,
+    }).catch((error) => {
+      console.warn("BDNB ffo_bat unavailable:", error);
+      return [];
     }),
     fetchBdnbRows("batiment_groupe_argiles", {
       limit: "1",
       batiment_groupe_id: `eq.${batimentGroupeId}`,
+    }).catch((error) => {
+      console.warn("BDNB argiles unavailable:", error);
+      return [];
     }),
     fetchBdnbRows("rel_batiment_groupe_dpe_logement_complet", {
       limit: "1",
       batiment_groupe_id: `eq.${batimentGroupeId}`,
+    }).catch((error) => {
+      console.warn("BDNB dpe unavailable:", error);
+      return [];
     }),
   ]);
 

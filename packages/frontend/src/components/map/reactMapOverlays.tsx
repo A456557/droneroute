@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useMemo } from "react";
-import mapboxgl from "mapbox-gl";
-import MapGL, {
+import {
   Marker as GLMarker,
   Popup,
   Source,
   Layer,
-} from "react-map-gl/mapbox";
+  useMap,
+} from "react-map-gl/maplibre";
 import { buildingApi, type RnbBuilding } from "@/lib/api";
 import { haversineDistance } from "@/lib/geo";
 const haversine = haversineDistance;
@@ -53,14 +53,11 @@ function buildSvgContent(opts: {
 // Marker overlay for Mapbox
 export function MarkerOverlay2D({
   position,
-  title,
   label,
   fillColor = "#2563eb",
   strokeColor = "#bfdbfe",
   scale = 8,
-  draggable = false,
   onClick,
-  onDragEnd,
 }: any) {
   const [lng, lat] = [
     position.lng ?? position.longitude ?? position[1] ?? 0,
@@ -91,13 +88,13 @@ export function PolylineOverlay2D({
   path,
   strokeColor = "#2563eb",
   strokeWidth = 3,
-  onClick,
 }: any) {
   const geojson = useMemo(
     () => ({
-      type: "Feature",
+      type: "Feature" as const,
+      properties: {},
       geometry: {
-        type: "LineString",
+        type: "LineString" as const,
         coordinates: path.map((p: any) => [
           p.lng ?? p.longitude ?? p[1],
           p.lat ?? p.latitude ?? p[0],
@@ -126,7 +123,6 @@ export function PolygonOverlay2D({
   strokeColor = "#ef4444",
   fillColor = "#ef4444",
   fillOpacity = 0.15,
-  onClick,
 }: any) {
   const coords = [
     path.map((p: any) => [
@@ -136,8 +132,9 @@ export function PolygonOverlay2D({
   ];
   const geojson = useMemo(
     () => ({
-      type: "Feature",
-      geometry: { type: "Polygon", coordinates: coords },
+      type: "Feature" as const,
+      properties: {},
+      geometry: { type: "Polygon" as const, coordinates: coords },
     }),
     [path],
   );
@@ -189,7 +186,7 @@ export function RnbBuildingsLayer2D({
           north,
         ]);
         if (!cancelled) onBuildingsChange(response.buildings);
-      } catch (e) {
+      } catch {
         if (!cancelled) onBuildingsChange([]);
       }
     }
@@ -229,9 +226,65 @@ export function RnbBuildingsLayer2D({
   );
 }
 
+// Activates 3D relief (terrain + pitched camera) on the open-source MapLibre
+// view when `active` is true. No API key required (AWS Terrarium tiles).
+export function MapLibre3DController({ active }: { active: boolean }) {
+  const maps = useMap();
+  const mapsRef = useRef(maps);
+  mapsRef.current = maps;
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const apply = () => {
+      if (cancelled) return;
+      try {
+        const ref: any = (mapsRef.current as any)?.default;
+        const map = ref?.getMap ? ref.getMap() : null;
+        if (!map || typeof map.addSource !== "function") {
+          timer = setTimeout(apply, 300);
+          return;
+        }
+        if (active) {
+          if (!map.getSource("terrain-dem")) {
+            map.addSource("terrain-dem", {
+              type: "raster-dem",
+              tiles: [
+                "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+              ],
+              tileSize: 256,
+              maxzoom: 15,
+              encoding: "terrarium",
+            });
+          }
+          map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
+          map.easeTo({ pitch: 60, duration: 800 });
+        } else {
+          try {
+            if (map.getTerrain && map.getTerrain()) map.setTerrain(null);
+          } catch {
+            // terrain was never set
+          }
+          if (typeof map.getPitch === "function" && map.getPitch() !== 0) {
+            map.easeTo({ pitch: 0, duration: 800 });
+          }
+        }
+      } catch {
+        timer = setTimeout(apply, 300);
+      }
+    };
+    apply();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [active]);
+
+  return null;
+}
+
 export function MapInteraction2D({
   mapRef,
-  targetTilt,
   templateMode,
   dragState,
   setDragState,
@@ -246,6 +299,16 @@ export function MapInteraction2D({
   rnbBuildings,
   onSelectRnbBuilding,
   onClearRnbSelection,
+  isAddingWaypoint,
+  isAddingPoi,
+  isDrawingObstacle,
+  drawingVertices,
+  addWaypoint,
+  addPoi,
+  addObstacle,
+  setDrawingVertices,
+  selectObstacle,
+  onFacadeSegmentClick,
 }: any) {
   useEffect(() => {
     const map = mapRef?.current?.getMap
@@ -253,13 +316,21 @@ export function MapInteraction2D({
       : mapRef?.current;
     if (!map) return;
 
-    function toPoint(e: any) {
-      const lngLat = e.lngLat ||
-        e.lngLat || { lng: e.lngLat?.lng, lat: e.lngLat?.lat };
-      return [lngLat.lat, lngLat.lng] as [number, number];
-    }
-
     const clickHandler = (e: any) => {
+      // Layer clicks (obstacle polygons, facade segments) are handled by
+      // dedicated handlers below — ignore them here.
+      try {
+        const hits =
+          typeof map.queryRenderedFeatures === "function"
+            ? map.queryRenderedFeatures(e.point, {
+                layers: ["obstacles-fill", "facade-segments-line"],
+              })
+            : [];
+        if (hits && hits.length > 0) return;
+      } catch {
+        // layer not ready yet, fall through to generic handling
+      }
+
       const point: [number, number] = [e.lngLat.lat, e.lngLat.lng];
 
       if (
@@ -322,6 +393,18 @@ export function MapInteraction2D({
         return;
       }
 
+      if (isDrawingObstacle) {
+        if (drawingVertices.length >= 3) {
+          const [firstLat, firstLng] = drawingVertices[0];
+          if (haversine(firstLat, firstLng, point[0], point[1]) < 5) {
+            addObstacle(drawingVertices);
+            return;
+          }
+        }
+        setDrawingVertices([...drawingVertices, point]);
+        return;
+      }
+
       if (rnbSelectionEnabled) {
         // simple point-in-polygon search
         const selected = rnbBuildings.find((b: any) => {
@@ -338,7 +421,19 @@ export function MapInteraction2D({
         }
       }
 
-      // add waypoint / poi handled elsewhere by mission store usage
+      if (isAddingWaypoint) {
+        addWaypoint(point[0], point[1]);
+        return;
+      }
+
+      if (isAddingPoi) {
+        addPoi(point[0], point[1]);
+        return;
+      }
+
+      if (rnbSelectionEnabled) {
+        onClearRnbSelection();
+      }
     };
 
     const moveHandler = (e: any) => {
@@ -353,16 +448,32 @@ export function MapInteraction2D({
       if (templateMode === "pencil" && rawPath.length >= 2) {
         // nothing special here, higher-level code will handle
       }
+      if (isDrawingObstacle && drawingVertices.length >= 3) {
+        addObstacle(drawingVertices);
+      }
     };
 
     map.on("click", clickHandler);
     map.on("mousemove", moveHandler);
     map.on("dblclick", dblHandler);
 
+    const obstacleClick = (e: any) => {
+      const id = e.features?.[0]?.properties?.id;
+      if (id && selectObstacle) selectObstacle(id);
+    };
+    const segmentClick = (e: any) => {
+      const id = e.features?.[0]?.properties?.id;
+      if (id && onFacadeSegmentClick) onFacadeSegmentClick(id);
+    };
+    map.on("click", "obstacles-fill", obstacleClick);
+    map.on("click", "facade-segments-line", segmentClick);
+
     return () => {
       map.off("click", clickHandler);
       map.off("mousemove", moveHandler);
       map.off("dblclick", dblHandler);
+      map.off("click", "obstacles-fill", obstacleClick);
+      map.off("click", "facade-segments-line", segmentClick);
     };
   }, [
     mapRef,
@@ -380,6 +491,16 @@ export function MapInteraction2D({
     rnbBuildings,
     onSelectRnbBuilding,
     onClearRnbSelection,
+    isAddingWaypoint,
+    isAddingPoi,
+    isDrawingObstacle,
+    drawingVertices,
+    addWaypoint,
+    addPoi,
+    addObstacle,
+    setDrawingVertices,
+    selectObstacle,
+    onFacadeSegmentClick,
   ]);
 
   return null;

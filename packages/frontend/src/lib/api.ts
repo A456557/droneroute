@@ -42,6 +42,7 @@ export interface RnbBuilding {
   rnbId: string;
   status: string | null;
   point: { lat: number; lng: number };
+  centroid: { lat: number; lng: number };
   footprint: Array<{ lat: number; lng: number }>;
   extIds: RnbBuildingExternalId[];
   bdTopoId: string | null;

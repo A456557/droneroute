@@ -13,19 +13,18 @@ import {
   User,
   ArrowLeft,
 } from "lucide-react";
-import { APIProvider, Map } from "@vis.gl/react-google-maps";
+import MapGL, {
+  Source,
+  Layer,
+  Marker as GLMarker,
+} from "react-map-gl/maplibre";
+import maplibregl from "maplibre-gl";
 import { Button } from "@/components/ui/button";
 import { useMissionStore } from "@/store/missionStore";
 import { useAuthStore } from "@/store/authStore";
-import { useConfigStore } from "@/store/configStore";
 import { api } from "@/lib/api";
 import { DRONE_MODELS } from "@droneroute/shared";
 import { getObstacleWarnings } from "@/lib/geo";
-import {
-  MarkerOverlay,
-  PolygonOverlay,
-  PolylineOverlay,
-} from "@/components/map/googleMapOverlays";
 import type {
   Waypoint,
   MissionConfig,
@@ -123,7 +122,6 @@ function SharedMissionMap({
   pois: PointOfInterest[];
   obstacles: Obstacle[];
 }) {
-  const googleMapsApiKey = useConfigStore((s) => s.googleMapsApiKey);
   const warnings = useMemo(
     () => getObstacleWarnings(waypoints, obstacles),
     [waypoints, obstacles],
@@ -141,74 +139,153 @@ function SharedMissionMap({
       ? [waypoints[0].longitude, waypoints[0].latitude]
       : [2.1686, 41.3874];
 
-  if (!googleMapsApiKey) return null;
+  const flightGeo = useMemo(() => {
+    const normal: [number, number][][] = [];
+    const warned: [number, number][][] = [];
+    waypoints.slice(0, -1).forEach((wp, i) => {
+      const next = waypoints[i + 1];
+      const segment: [number, number][] = [
+        [wp.longitude, wp.latitude],
+        [next.longitude, next.latitude],
+      ];
+      if (warningSegments.has(wp.index)) warned.push(segment);
+      else normal.push(segment);
+    });
+    const toCollection = (segments: [number, number][][]) =>
+      ({
+        type: "FeatureCollection",
+        features: segments.map((coordinates) => ({
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates },
+        })),
+      }) as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+    return { normal: toCollection(normal), warned: toCollection(warned) };
+  }, [waypoints, warningSegments]);
+
+  const obstaclesGeo = useMemo(
+    () =>
+      ({
+        type: "FeatureCollection",
+        features: obstacles
+          .filter((o) => o.vertices.length >= 3)
+          .map((o) => {
+            const ring = o.vertices.map(([lat, lng]): [number, number] => [
+              lng,
+              lat,
+            ]);
+            ring.push(ring[0]);
+            return {
+              type: "Feature",
+              properties: { id: o.id },
+              geometry: { type: "Polygon", coordinates: [ring] },
+            };
+          }),
+      }) as GeoJSON.FeatureCollection<GeoJSON.Geometry>,
+    [obstacles],
+  );
 
   return (
     <div className="h-[360px] w-full rounded-lg overflow-hidden border border-border">
-      <APIProvider apiKey={googleMapsApiKey}>
-        <Map
-          defaultCenter={{ lat: center[1], lng: center[0] }}
-          defaultZoom={14}
-          mapTypeId="roadmap"
-          disableDefaultUI
-          clickableIcons={false}
-          className="h-full w-full"
+      <MapGL
+        initialViewState={{
+          longitude: center[0],
+          latitude: center[1],
+          zoom: 14,
+        }}
+        mapLib={maplibregl as any}
+        mapStyle="https://tiles.openfreemap.org/styles/bright"
+        style={{ width: "100%", height: "100%" }}
+      >
+        <Source
+          id="shared-flight-normal"
+          type="geojson"
+          data={flightGeo.normal}
         >
-          {waypoints.slice(0, -1).map((wp, i) => {
-            const next = waypoints[i + 1];
-            return (
-              <PolylineOverlay
-                key={`shared-flight-${wp.index}-${next.index}`}
-                path={[
-                  { lat: wp.latitude, lng: wp.longitude },
-                  { lat: next.latitude, lng: next.longitude },
-                ]}
-                strokeColor={
-                  warningSegments.has(wp.index) ? "#ef4444" : "#3b82f6"
-                }
-                strokeOpacity={0.85}
-                strokeWeight={3}
-              />
-            );
-          })}
+          <Layer
+            id="shared-flight-normal-line"
+            type="line"
+            paint={{
+              "line-color": "#3b82f6",
+              "line-width": 3,
+              "line-opacity": 0.85,
+            }}
+          />
+        </Source>
+        <Source
+          id="shared-flight-warned"
+          type="geojson"
+          data={flightGeo.warned}
+        >
+          <Layer
+            id="shared-flight-warned-line"
+            type="line"
+            paint={{
+              "line-color": "#ef4444",
+              "line-width": 3,
+              "line-opacity": 0.85,
+            }}
+          />
+        </Source>
 
-          {obstacles.map((obstacle) => (
-            <PolygonOverlay
-              key={`shared-obstacle-${obstacle.id}`}
-              path={obstacle.vertices.map(([lat, lng]) => ({ lat, lng }))}
-              strokeColor="#ef4444"
-              fillColor="#ef4444"
-              fillOpacity={0.12}
-            />
-          ))}
+        <Source id="shared-obstacles" type="geojson" data={obstaclesGeo}>
+          <Layer
+            id="shared-obstacles-fill"
+            type="fill"
+            paint={{ "fill-color": "#ef4444", "fill-opacity": 0.12 }}
+          />
+          <Layer
+            id="shared-obstacles-outline"
+            type="line"
+            paint={{ "line-color": "#ef4444", "line-width": 2 }}
+          />
+        </Source>
 
-          {waypoints.map((wp, i) => (
-            <MarkerOverlay
-              key={`shared-wp-${wp.index}`}
-              position={{ lat: wp.latitude, lng: wp.longitude }}
-              fillColor={
-                i === 0
-                  ? "#22c55e"
-                  : i === waypoints.length - 1
-                    ? "#ef4444"
-                    : "#3b82f6"
-              }
-              strokeColor="#bfdbfe"
-              scale={7}
+        {waypoints.map((wp, i) => (
+          <GLMarker
+            key={`shared-wp-${wp.index}`}
+            longitude={wp.longitude}
+            latitude={wp.latitude}
+            anchor="center"
+          >
+            <div
+              title={`${wp.name}\nAlt: ${wp.height}m`}
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 7,
+                background:
+                  i === 0
+                    ? "#22c55e"
+                    : i === waypoints.length - 1
+                      ? "#ef4444"
+                      : "#3b82f6",
+                border: "2px solid #bfdbfe",
+              }}
             />
-          ))}
+          </GLMarker>
+        ))}
 
-          {pois.map((poi) => (
-            <MarkerOverlay
-              key={`shared-poi-${poi.id}`}
-              position={{ lat: poi.latitude, lng: poi.longitude }}
-              fillColor="#f59e0b"
-              strokeColor="#fcd34d"
-              scale={6}
+        {pois.map((poi) => (
+          <GLMarker
+            key={`shared-poi-${poi.id}`}
+            longitude={poi.longitude}
+            latitude={poi.latitude}
+            anchor="center"
+          >
+            <div
+              title={`${poi.name}\nHeight: ${poi.height}m`}
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: 6,
+                background: "#f59e0b",
+                border: "2px solid #fcd34d",
+              }}
             />
-          ))}
-        </Map>
-      </APIProvider>
+          </GLMarker>
+        ))}
+      </MapGL>
     </div>
   );
 }

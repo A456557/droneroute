@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from "react";
-import { Source, Layer, Popup, useMap } from "react-map-gl/mapbox";
+import { Source, Layer, Popup, useMap } from "react-map-gl/maplibre";
 import { useAirspaceStore } from "@/store/airspaceStore";
 
 interface HoveredZone {
@@ -50,7 +50,7 @@ export function AirspaceOverlay() {
     if (!map || !enabled) return;
     const m = map.getMap();
 
-    const onMouseMove = (e: mapboxgl.MapMouseEvent) => {
+    const onMouseMove = (e: any) => {
       const features = m.queryRenderedFeatures(e.point, {
         layers: ["airspace-zones-fill"],
       });

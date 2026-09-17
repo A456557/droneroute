@@ -30,8 +30,6 @@ services:
       - JWT_SECRET=${JWT_SECRET:-change-this-secret-in-production}
       - DB_PATH=${DB_PATH:-/app/data/droneroute.db}
       - SELF_HOSTED=${SELF_HOSTED:-true}
-      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY:-}
-      - VITE_GOOGLE_MAPS_API_KEY=${VITE_GOOGLE_MAPS_API_KEY:-}
       - AI_PROVIDER=${AI_PROVIDER:-}
       - GITHUB_MODELS_TOKEN=${GITHUB_MODELS_TOKEN:-}
       - GITHUB_MODELS_MODEL=${GITHUB_MODELS_MODEL:-}

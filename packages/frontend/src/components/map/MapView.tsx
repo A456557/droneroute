@@ -1,29 +1,26 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AltitudeMode,
-  APIProvider,
-  GestureHandling,
-  Map,
-  Map3D,
-  MapMode,
-  Marker3D,
-  RenderingType,
-  useMap,
-} from "@vis.gl/react-google-maps";
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  Fragment,
+} from "react";
 import MapGL, {
   Source,
   Layer,
   Marker as GLMarker,
-  Popup,
-} from "react-map-gl/mapbox";
+} from "react-map-gl/maplibre";
 import maplibregl from "maplibre-gl";
-import { RnbBuildingsLayer2D, MapInteraction2D } from "./reactMapOverlays";
+import {
+  RnbBuildingsLayer2D,
+  MapInteraction2D,
+  MapLibre3DController,
+} from "./reactMapOverlays";
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
-import { usePreferencesStore } from "@/store/preferencesStore";
-import { useAirspaceStore } from "@/store/airspaceStore";
-import { getObstacleWarnings, pointInPolygon } from "@/lib/geo";
+import { getObstacleWarnings } from "@/lib/geo";
 import {
   type BdnbBuildingEnrichment,
   buildingApi,
@@ -55,13 +52,8 @@ import {
 } from "@/lib/templates";
 import { MapToolbar } from "./MapToolbar";
 import { TemplateConfigPanel } from "./TemplateConfigPanel";
-import {
-  InfoWindowOverlay,
-  MarkerOverlay,
-  PolygonOverlay,
-  PolylineOverlay,
-} from "./googleMapOverlays";
-import { RnbBuildingsLayer } from "./RnbBuildingsLayer";
+import { AirspaceOverlay } from "./AirspaceOverlay";
+import type { PointOfInterest } from "@droneroute/shared";
 
 type DraggablePanelProps = {
   className: string;
@@ -183,7 +175,8 @@ function DraggablePanel({
   );
 }
 
-type LatLng = google.maps.LatLngLiteral;
+type LatLng = { lat: number; lng: number };
+type LatLngAltitude = { lat: number; lng: number; altitude: number };
 type TemplateMode = "orbit" | "grid" | "facade" | "pencil" | null;
 type FacadeSegmentOption = {
   id: string;
@@ -204,15 +197,6 @@ type FacadeVariantOption = {
   detail: string;
 };
 
-type Buildings3DView = {
-  center: google.maps.LatLngAltitudeLiteral;
-  range: number;
-  heading: number;
-  tilt: number;
-  title: string;
-  subtitle: string;
-};
-
 type MainMapViewport = {
   center: LatLng;
   zoom: number;
@@ -222,19 +206,13 @@ type MainMapViewport = {
 
 type Buildings3DMarker = {
   id: string;
-  position: google.maps.LatLngLiteral;
+  position: LatLng;
   glyph: string;
   label: string;
   background: string;
   borderColor: string;
   glyphColor: string;
   scale?: number;
-};
-
-type Buildings3DScanRoute = {
-  title: string;
-  path: google.maps.LatLngAltitudeLiteral[];
-  waypointMarkers: Buildings3DMarker[];
 };
 
 type ReconstructionPresetOption = {
@@ -271,8 +249,8 @@ type StreetViewContext = {
 };
 
 type ReconstructedBuildingShell = {
-  roofCoordinates: google.maps.LatLngAltitudeLiteral[];
-  ridgeCoordinates: google.maps.LatLngAltitudeLiteral[] | null;
+  roofCoordinates: LatLngAltitude[];
+  ridgeCoordinates: LatLngAltitude[] | null;
   estimatedHeightM: number;
   wallHeightM: number;
   roofPeakHeightM: number;
@@ -286,7 +264,7 @@ type ReconstructedBuildingShell = {
 
 type SelectedRnbBuilding = {
   building: RnbBuilding;
-  position: google.maps.LatLngLiteral;
+  position: LatLng;
 };
 
 type BuildingDetectionCacheEntry = {
@@ -297,8 +275,8 @@ type BuildingDetectionCacheEntry = {
 };
 
 const MIN_PENCIL_PATH_LENGTH_M = 10;
-const ROADMAP_TYPE = "roadmap" as google.maps.MapTypeId;
-const HYBRID_TYPE = "hybrid" as google.maps.MapTypeId;
+const ROADMAP_TYPE = "roadmap";
+const HYBRID_TYPE = "hybrid";
 const RECONSTRUCTION_DEMO_QUERY = "facade-reconstruction";
 const BUILDING_DETECTION_CACHE_KEY = "droneroute-building-detection-cache-v1";
 const BUILDING_DETECTION_CACHE_MAX_ENTRIES = 12;
@@ -797,22 +775,6 @@ function findCachedBuildingDetection(
   return bestMatch?.entry.response ?? null;
 }
 
-function dashedIcon(strokeColor: string): google.maps.IconSequence[] {
-  return [
-    {
-      icon: {
-        path: "M 0,-1 0,1",
-        strokeOpacity: 1,
-        strokeWeight: 2,
-        strokeColor,
-        scale: 2,
-      },
-      offset: "0",
-      repeat: "12px",
-    },
-  ];
-}
-
 function haversine(
   lat1: number,
   lng1: number,
@@ -974,9 +936,10 @@ function computePlaneCorners(
 }
 
 function selectionModeFromEvent(
-  event: google.maps.MapMouseEvent | undefined,
+  event: { domEvent?: unknown; originalEvent?: unknown } | undefined,
 ): "replace" | "toggle" | "range" {
-  const domEvent = event?.domEvent;
+  const domEvent =
+    event?.domEvent ?? (event as { originalEvent?: unknown })?.originalEvent;
   if (domEvent instanceof MouseEvent) {
     if (domEvent.ctrlKey || domEvent.metaKey) return "toggle";
     if (domEvent.shiftKey) return "range";
@@ -1159,55 +1122,6 @@ function pointToSegmentDistanceMeters(
   const projectionX = startXY.x + t * segmentDx;
   const projectionY = startXY.y + t * segmentDy;
   return Math.hypot(pointXY.x - projectionX, pointXY.y - projectionY);
-}
-
-function footprintSelectionDistanceMeters(
-  point: LatLng,
-  footprint: LatLng[],
-): number {
-  const normalized = normalizeFootprint(footprint);
-  if (normalized.length === 0) {
-    return Number.POSITIVE_INFINITY;
-  }
-
-  if (
-    pointInPolygon(
-      [point.lat, point.lng],
-      normalized.map((vertex) => [vertex.lat, vertex.lng]),
-    )
-  ) {
-    return 0;
-  }
-
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (let index = 0; index < normalized.length; index += 1) {
-    const start = normalized[index];
-    const end = normalized[(index + 1) % normalized.length];
-    bestDistance = Math.min(
-      bestDistance,
-      pointToSegmentDistanceMeters(point, start, end),
-    );
-  }
-
-  return bestDistance;
-}
-
-function findSelectableRnbBuilding(
-  point: LatLng,
-  buildings: RnbBuilding[],
-): RnbBuilding | null {
-  const selectionThresholdM = 14;
-
-  const bestMatch = buildings
-    .map((building) => ({
-      building,
-      distanceM: footprintSelectionDistanceMeters(point, building.footprint),
-    }))
-    .filter((candidate) => candidate.distanceM <= selectionThresholdM)
-    .sort((left, right) => left.distanceM - right.distanceM)[0];
-
-  return bestMatch?.building ?? null;
 }
 
 function rankFacadeSegments(
@@ -1609,272 +1523,6 @@ function buildFacadeScenario(
   };
 }
 
-function buildBuildings3DView(args: {
-  templatePreview: TemplateResult | null;
-  activeTemplateType: TemplateMode;
-  detectedBuilding: DetectedBuilding | null;
-  selectedSegment: FacadeSegmentOption | null;
-  facadeParams: FacadeParams | null;
-  selectedWaypoint:
-    | ReturnType<typeof useMissionStore.getState>["waypoints"][number]
-    | null;
-  selectedWaypointHeading: number | null;
-  mainMapViewport: MainMapViewport | null;
-  defaultMapView: { latitude: number; longitude: number; zoom: number };
-}): Buildings3DView {
-  const {
-    templatePreview,
-    activeTemplateType,
-    detectedBuilding,
-    selectedSegment,
-    facadeParams,
-    selectedWaypoint,
-    selectedWaypointHeading,
-    mainMapViewport,
-    defaultMapView,
-  } = args;
-
-  if (templatePreview && activeTemplateType) {
-    const templatePoints = [
-      ...templatePreview.waypoints.map((waypoint) => ({
-        lat: waypoint.latitude,
-        lng: waypoint.longitude,
-      })),
-      ...templatePreview.pois.map((poi) => ({
-        lat: poi.latitude,
-        lng: poi.longitude,
-      })),
-    ];
-
-    if (templatePoints.length > 0) {
-      const latitudes = templatePoints.map((point) => point.lat);
-      const longitudes = templatePoints.map((point) => point.lng);
-      const minLat = Math.min(...latitudes);
-      const maxLat = Math.max(...latitudes);
-      const minLng = Math.min(...longitudes);
-      const maxLng = Math.max(...longitudes);
-      const diagonalM = haversine(minLat, minLng, maxLat, maxLng);
-      const maxTemplateAltitude = Math.max(
-        30,
-        ...templatePreview.waypoints.map((waypoint) => waypoint.height),
-      );
-      const heading = selectedSegment
-        ? (bearingTo(
-            selectedSegment.start.lat,
-            selectedSegment.start.lng,
-            selectedSegment.end.lat,
-            selectedSegment.end.lng,
-          ) +
-            90) %
-          360
-        : facadeParams
-          ? (bearingTo(
-              facadeParams.point1[0],
-              facadeParams.point1[1],
-              facadeParams.point2[0],
-              facadeParams.point2[1],
-            ) +
-              90) %
-            360
-          : templatePoints.length >= 2
-            ? bearingTo(
-                templatePoints[0].lat,
-                templatePoints[0].lng,
-                templatePoints[templatePoints.length - 1].lat,
-                templatePoints[templatePoints.length - 1].lng,
-              )
-            : (mainMapViewport?.heading ?? 0);
-      const range = clamp(
-        Math.max(
-          diagonalM * (activeTemplateType === "facade" ? 2.8 : 2.35),
-          activeTemplateType === "facade"
-            ? (selectedSegment?.lengthM ?? 36) * 4.6
-            : 170,
-        ),
-        140,
-        3200,
-      );
-      const subtitle =
-        activeTemplateType === "facade"
-          ? "Focused on the current facade template"
-          : `Focused on the current ${activeTemplateType} template`;
-
-      return {
-        center: {
-          lat: (minLat + maxLat) / 2,
-          lng: (minLng + maxLng) / 2,
-          altitude: Math.max(maxTemplateAltitude * 1.8, range * 0.35),
-        },
-        range,
-        heading,
-        tilt: activeTemplateType === "facade" ? 67.5 : 62.5,
-        title: "Google Buildings 3D",
-        subtitle,
-      };
-    }
-  }
-
-  if (mainMapViewport) {
-    const latitudeFactor = Math.max(
-      0.35,
-      Math.cos(deg2rad(mainMapViewport.center.lat)),
-    );
-    const groundResolutionMPerPixel =
-      (156543.03392 * latitudeFactor) / 2 ** mainMapViewport.zoom;
-    const range = clamp(groundResolutionMPerPixel * 720, 140, 3200);
-    const subtitle = detectedBuilding
-      ? "Synced to the current main map view around the detected building"
-      : selectedWaypoint
-        ? `Synced to the current main map view near ${selectedWaypoint.name}`
-        : "Synced to the current main map view";
-
-    return {
-      center: {
-        lat: mainMapViewport.center.lat,
-        lng: mainMapViewport.center.lng,
-        altitude: Math.max(90, range * 0.35),
-      },
-      range,
-      heading: mainMapViewport.heading,
-      tilt: mainMapViewport.tilt > 0 ? 67.5 : 55,
-      title: "Google Buildings 3D",
-      subtitle,
-    };
-  }
-
-  if (detectedBuilding) {
-    const center = {
-      lat: detectedBuilding.centroid.lat,
-      lng: detectedBuilding.centroid.lng,
-      altitude: Math.max(80, (detectedBuilding.estimatedHeightM ?? 30) * 2.5),
-    };
-    const heading = selectedSegment
-      ? (bearingTo(
-          selectedSegment.start.lat,
-          selectedSegment.start.lng,
-          selectedSegment.end.lat,
-          selectedSegment.end.lng,
-        ) +
-          90) %
-        360
-      : facadeParams
-        ? (bearingTo(
-            facadeParams.point1[0],
-            facadeParams.point1[1],
-            facadeParams.point2[0],
-            facadeParams.point2[1],
-          ) +
-            90) %
-          360
-        : 0;
-    const referenceLength = selectedSegment?.lengthM ?? 40;
-
-    return {
-      center,
-      range: clamp(referenceLength * 5, 120, 650),
-      heading,
-      tilt: 67.5,
-      title: "Google Buildings 3D",
-      subtitle: detectedBuilding.estimatedHeightM
-        ? `Photorealistic building view, estimated ${Math.round(detectedBuilding.estimatedHeightM)}m high`
-        : "Photorealistic building view centered on the detected footprint",
-    };
-  }
-
-  if (selectedWaypoint) {
-    return {
-      center: {
-        lat: selectedWaypoint.latitude,
-        lng: selectedWaypoint.longitude,
-        altitude: Math.max(90, selectedWaypoint.height * 2),
-      },
-      range: 220,
-      heading: selectedWaypointHeading ?? 0,
-      tilt: 65,
-      title: "Google Buildings 3D",
-      subtitle: `Centered on ${selectedWaypoint.name}`,
-    };
-  }
-
-  return {
-    center: {
-      lat: defaultMapView.latitude,
-      lng: defaultMapView.longitude,
-      altitude: 180,
-    },
-    range: 450,
-    heading: 0,
-    tilt: 55,
-    title: "Google Buildings 3D",
-    subtitle: "Photorealistic city view around the current mission area",
-  };
-}
-
-async function resolveStreetViewContext(
-  building: DetectedBuilding,
-  selectedSegment: FacadeSegmentOption | null,
-): Promise<StreetViewContext> {
-  if (typeof google === "undefined" || !google.maps?.StreetViewService) {
-    return {
-      status: "unknown",
-      panoramaLocation: null,
-      distanceM: null,
-      headingFromBuildingDeg: null,
-      label: "Street View unavailable in this session",
-    };
-  }
-
-  const targetPoint = selectedSegment
-    ? segmentMidpoint(selectedSegment)
-    : building.centroid;
-
-  return new Promise((resolve) => {
-    const service = new google.maps.StreetViewService();
-    service.getPanorama(
-      {
-        location: targetPoint,
-        radius: clamp(Math.max(30, building.distanceToQueryM + 24), 30, 90),
-      },
-      (result, status) => {
-        if (
-          status !== google.maps.StreetViewStatus.OK ||
-          !result?.location?.latLng
-        ) {
-          resolve({
-            status: "unavailable",
-            panoramaLocation: null,
-            distanceM: null,
-            headingFromBuildingDeg: null,
-            label: "No nearby Street View cue",
-          });
-          return;
-        }
-
-        const panoramaLocation = result.location.latLng.toJSON();
-        const distanceM = haversine(
-          targetPoint.lat,
-          targetPoint.lng,
-          panoramaLocation.lat,
-          panoramaLocation.lng,
-        );
-
-        resolve({
-          status: "available",
-          panoramaLocation,
-          distanceM,
-          headingFromBuildingDeg: bearingTo(
-            building.centroid.lat,
-            building.centroid.lng,
-            panoramaLocation.lat,
-            panoramaLocation.lng,
-          ),
-          label: `Street View cue ${Math.round(distanceM)}m away`,
-        });
-      },
-    );
-  });
-}
-
 function buildApproximateBuildingShell(
   building: DetectedBuilding | null,
   selectedSegment: FacadeSegmentOption | null,
@@ -2057,7 +1705,8 @@ function buildApproximateBuildingShell(
     heuristicHeightM,
   );
   const roofStyleLabel = formatRoofStyleLabel(roofStyle);
-  const streetViewLabel = streetViewContext?.label ?? "Street View cue pending";
+  const streetViewLabel =
+    streetViewContext?.label ?? "Visual context cue pending";
 
   return {
     roofCoordinates,
@@ -2072,10 +1721,10 @@ function buildApproximateBuildingShell(
     sourceSummary: [
       "OSM footprint",
       resolvedHeightSourceLabel,
-      "Google Buildings 3D context",
+      "Open-source 3D context",
       streetViewLabel,
     ].join(" • "),
-    note: `Hybrid estimate using OSM footprint, ${resolvedHeightSourceLabel.toLowerCase()}, Google 3D context, and ${streetViewLabel.toLowerCase()}. The ${roofStyleLabel.toLowerCase()} is still heuristic, so the model remains approximate.`,
+    note: `Hybrid estimate using OSM footprint, ${resolvedHeightSourceLabel.toLowerCase()}, open-source 3D context, and ${streetViewLabel.toLowerCase()}. The ${roofStyleLabel.toLowerCase()} is still heuristic, so the model remains approximate.`,
   };
 }
 
@@ -2177,240 +1826,6 @@ function buildBuildings3DMarkers(args: {
   return markers;
 }
 
-function toGroundPolygonCoordinates(
-  footprint: LatLng[],
-): google.maps.LatLngAltitudeLiteral[] {
-  return footprint.map((point) => ({
-    lat: point.lat,
-    lng: point.lng,
-    altitude: 0,
-  }));
-}
-
-function Buildings3DPanel({
-  open,
-  view,
-  markers,
-  showRnbLayer,
-  rnbBuildings,
-  selectedRnbBuildingId,
-  detectedBuilding: _detectedBuilding,
-  reconstructionShell,
-  contextShells,
-  scanRoute,
-  streetViewContext: _streetViewContext,
-  selectedSegment,
-  facadeRecommendation,
-  onClose,
-}: {
-  open: boolean;
-  view: Buildings3DView;
-  markers: Buildings3DMarker[];
-  showRnbLayer: boolean;
-  rnbBuildings: RnbBuilding[];
-  selectedRnbBuildingId: string | null;
-  detectedBuilding: DetectedBuilding | null;
-  reconstructionShell: ReconstructedBuildingShell | null;
-  contextShells: Array<{ id: string; shell: ReconstructedBuildingShell }>;
-  scanRoute: Buildings3DScanRoute | null;
-  streetViewContext: StreetViewContext | null;
-  selectedSegment: FacadeSegmentOption | null;
-  facadeRecommendation: FacadeCopilotRecommendation | null;
-  onClose: () => void;
-}) {
-  if (!open) return null;
-
-  const approximateBuildingShell = reconstructionShell;
-  const routeWaypointMarkers = scanRoute?.waypointMarkers ?? [];
-  const asPolygon3DPath = (
-    path: Iterable<
-      | google.maps.LatLngAltitude
-      | google.maps.LatLngAltitudeLiteral
-      | google.maps.LatLngLiteral
-    >,
-  ) => path as unknown as string;
-
-  return (
-    <div className="absolute inset-0 z-0 flex flex-col overflow-hidden bg-background">
-      <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wider text-cyan-400">
-            {view.title}
-          </p>
-          <p className="text-[11px] text-muted-foreground">{view.subtitle}</p>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
-        >
-          2D
-        </button>
-      </div>
-      <div className="relative min-h-0 flex-1 bg-black/30">
-        <Map3D
-          key={`${view.center.lat.toFixed(6)}-${view.center.lng.toFixed(6)}-${Math.round(view.heading)}-${Math.round(view.range)}`}
-          defaultCenter={view.center}
-          defaultRange={view.range}
-          defaultHeading={view.heading}
-          defaultTilt={view.tilt}
-          mode={MapMode.SATELLITE}
-          gestureHandling={GestureHandling.GREEDY}
-          style={{ width: "100%", height: "100%" }}
-        >
-          {rnbBuildings.map((building) => {
-            const isSelected = building.rnbId === selectedRnbBuildingId;
-            return (
-              <gmp-polygon-3d
-                key={`rnb-footprint-${building.rnbId}`}
-                altitudeMode={
-                  AltitudeMode.CLAMP_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
-                }
-                path={asPolygon3DPath(
-                  toGroundPolygonCoordinates(building.footprint),
-                )}
-                fillColor={
-                  isSelected
-                    ? "rgba(34, 211, 238, 0.28)"
-                    : "rgba(56, 189, 248, 0.14)"
-                }
-                strokeColor={isSelected ? "#22d3ee" : "#0ea5e9"}
-                strokeWidth={isSelected ? 3 : 2}
-                drawsOccludedSegments
-                zIndex={isSelected ? 26 : 14}
-              />
-            );
-          })}
-          {contextShells.map(({ id, shell }) => (
-            <gmp-polygon-3d
-              key={`context-shell-${id}`}
-              altitudeMode={
-                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
-              }
-              path={asPolygon3DPath(shell.roofCoordinates)}
-              fillColor="rgba(148, 163, 184, 0.16)"
-              strokeColor="#94a3b8"
-              strokeWidth={1}
-              extruded
-              drawsOccludedSegments
-              zIndex={12}
-            />
-          ))}
-          {scanRoute && scanRoute.path.length >= 2 && (
-            <gmp-polyline-3d
-              altitudeMode={
-                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
-              }
-              coordinates={scanRoute.path}
-              strokeColor="#f59e0b"
-              strokeWidth={3}
-              outerColor="#7c2d12"
-              outerWidth={1}
-              drawsOccludedSegments
-              zIndex={18}
-            />
-          )}
-          {approximateBuildingShell && (
-            <gmp-polygon-3d
-              altitudeMode={
-                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
-              }
-              path={asPolygon3DPath(approximateBuildingShell.roofCoordinates)}
-              fillColor="rgba(20, 184, 166, 0.22)"
-              strokeColor="#2dd4bf"
-              strokeWidth={2}
-              extruded
-              drawsOccludedSegments
-              zIndex={20}
-            />
-          )}
-          {approximateBuildingShell?.ridgeCoordinates && (
-            <gmp-polyline-3d
-              altitudeMode={
-                AltitudeMode.RELATIVE_TO_GROUND as unknown as google.maps.maps3d.AltitudeMode
-              }
-              coordinates={approximateBuildingShell.ridgeCoordinates}
-              strokeColor="#ccfbf1"
-              strokeWidth={2}
-              outerColor="#134e4a"
-              outerWidth={1}
-              drawsOccludedSegments
-              zIndex={24}
-            />
-          )}
-          {routeWaypointMarkers.map((marker) => (
-            <Marker3D
-              key={marker.id}
-              position={marker.position}
-              altitudeMode={AltitudeMode.RELATIVE_TO_GROUND}
-            >
-              <Pin
-                glyph={marker.glyph}
-                background={marker.background}
-                borderColor={marker.borderColor}
-                glyphColor={marker.glyphColor}
-                scale={marker.scale}
-              />
-            </Marker3D>
-          ))}
-          {markers.map((marker) => (
-            <Marker3D
-              key={marker.id}
-              position={marker.position}
-              altitudeMode={AltitudeMode.CLAMP_TO_GROUND}
-            >
-              <Pin
-                glyph={marker.glyph}
-                background={marker.background}
-                borderColor={marker.borderColor}
-                glyphColor={marker.glyphColor}
-                scale={marker.scale}
-              />
-            </Marker3D>
-          ))}
-        </Map3D>
-        {showRnbLayer && rnbBuildings.length === 0 && (
-          <div className="pointer-events-none absolute right-3 top-3 max-w-[260px] rounded-md border border-sky-500/25 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
-            <p className="font-medium text-foreground">Bâtiments 2D</p>
-            <p className="text-muted-foreground">
-              Aucune emprise RNB visible dans cette zone.
-            </p>
-          </div>
-        )}
-        {contextShells.length > 0 && (
-          <div className="pointer-events-none absolute left-3 top-3 max-w-[260px] rounded-md border border-slate-400/30 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
-            <p className="font-medium text-foreground">Fallback OSM massing</p>
-            <p className="text-muted-foreground">
-              {contextShells.length} nearby building
-              {contextShells.length > 1 ? "s" : ""} extruded for areas where
-              Google Buildings 3D is sparse.
-            </p>
-          </div>
-        )}
-        {facadeRecommendation && selectedSegment && (
-          <div className="pointer-events-none absolute right-3 bottom-3 max-w-[260px] rounded-md border border-cyan-500/30 bg-background/88 px-3 py-2 text-[10px] shadow-lg backdrop-blur-sm">
-            <p className="font-medium text-foreground">Copilot in 3D</p>
-            <p className="text-muted-foreground">
-              Goal: {facadeRecommendation.objectiveLabel}
-            </p>
-            <p className="text-muted-foreground">
-              Facade: {selectedSegment.label} •{" "}
-              {selectedSegment.lengthM.toFixed(0)}m
-            </p>
-            <p className="text-cyan-200">
-              Recommended: {facadeRecommendation.recommendedVariantLabel}
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function obstaclePath(vertices: [number, number][]): LatLng[] {
-  return vertices.map(([lat, lng]) => ({ lat, lng }));
-}
-
 function rectanglePath(a: [number, number], b: [number, number]): LatLng[] {
   return [
     { lat: a[0], lng: a[1] },
@@ -2434,109 +1849,63 @@ function circlePath(center: [number, number], radiusM: number): LatLng[] {
   return coords;
 }
 
-function geometryToPaths(geometry: GeoJSON.Geometry): LatLng[][] {
-  if (geometry.type === "Polygon") {
-    return [
-      (geometry.coordinates[0] as [number, number][]).map(([lng, lat]) => ({
-        lat,
-        lng,
-      })),
-    ];
-  }
-  if (geometry.type === "MultiPolygon") {
-    return geometry.coordinates.map((polygon) =>
-      (polygon[0] as [number, number][]).map(([lng, lat]) => ({ lat, lng })),
-    );
-  }
-  return [];
-}
-
-function FitBoundsOnLoad() {
-  const map = useMap();
-  const waypoints = useMissionStore((s) => s.waypoints);
-  const pois = useMissionStore((s) => s.pois);
-  const obstacles = useMissionStore((s) => s.obstacles);
-  const prevCountRef = useRef(0);
-
-  useEffect(() => {
-    const wasEmpty = prevCountRef.current === 0;
-    prevCountRef.current = waypoints.length;
-    if (!map || !wasEmpty || waypoints.length < 2) return;
-
-    const bounds = new google.maps.LatLngBounds();
-    for (const waypoint of waypoints)
-      bounds.extend(toLatLng(waypoint.latitude, waypoint.longitude));
-    for (const poi of pois)
-      bounds.extend(toLatLng(poi.latitude, poi.longitude));
-    for (const obstacle of obstacles) {
-      for (const [lat, lng] of obstacle.vertices) bounds.extend({ lat, lng });
-    }
-
-    if (!bounds.isEmpty()) map.fitBounds(bounds, 48);
-  }, [map, waypoints, pois, obstacles]);
-
-  return null;
-}
-
-function MainMapViewportSync({
-  onChange,
-}: {
-  onChange: (viewport: MainMapViewport) => void;
-}) {
-  const map = useMap();
-
-  useEffect(() => {
-    if (!map) return;
-
-    const publish = () => {
-      const center = map.getCenter();
-      if (!center) return;
-
-      onChange({
-        center: center.toJSON(),
-        zoom: map.getZoom() ?? 15,
-        heading: map.getHeading() ?? 0,
-        tilt: map.getTilt() ?? 0,
-      });
-    };
-
-    publish();
-    const listener = map.addListener("idle", publish);
-    return () => listener.remove();
-  }, [map, onChange]);
-
-  return null;
-}
+type BanSearchResult = { label: string; lat: number; lng: number };
 
 function MapSearch({
   value,
   onValueChange,
+  onPick,
 }: {
   value: string;
   onValueChange: (value: string) => void;
+  onPick: (lat: number, lng: number) => void;
 }) {
-  const map = useMap();
   const [error, setError] = useState("");
+  const [results, setResults] = useState<BanSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
 
-  const handleSearch = useCallback(() => {
-    if (!map || !value.trim()) return;
-    const geocoder = new google.maps.Geocoder();
-    geocoder.geocode({ address: value }, (results, status) => {
-      if (status !== "OK" || !results?.[0]) {
+  const handleSearch = useCallback(async () => {
+    const query = value.trim();
+    if (!query) return;
+    setSearching(true);
+    setError("");
+    try {
+      // BAN (Base Adresse Nationale): free French address search, no key.
+      const response = await fetch(
+        `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(query)}&limit=5`,
+      );
+      if (!response.ok) throw new Error(`search failed (${response.status})`);
+      const payload = (await response.json()) as {
+        features?: Array<{
+          properties?: { label?: string };
+          geometry?: { coordinates?: [number, number] };
+        }>;
+      };
+      const parsed = (payload.features ?? [])
+        .map((feature) => ({
+          label: feature.properties?.label ?? "",
+          lng: feature.geometry?.coordinates?.[0],
+          lat: feature.geometry?.coordinates?.[1],
+        }))
+        .filter(
+          (r): r is BanSearchResult =>
+            r.label !== "" &&
+            typeof r.lat === "number" &&
+            typeof r.lng === "number",
+        );
+      if (parsed.length === 0) {
         setError("Location not found.");
+        setResults([]);
         return;
       }
-
-      setError("");
-      const first = results[0];
-      if (first.geometry.viewport) {
-        map.fitBounds(first.geometry.viewport);
-      } else if (first.geometry.location) {
-        map.panTo(first.geometry.location);
-        map.setZoom(15);
-      }
-    });
-  }, [map, value]);
+      setResults(parsed);
+    } catch {
+      setError("Search failed.");
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, [value]);
 
   return (
     <>
@@ -2545,18 +1914,36 @@ function MapSearch({
           value={value}
           onChange={(event) => onValueChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") handleSearch();
+            if (event.key === "Enter") void handleSearch();
           }}
           placeholder="Search location..."
           className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm"
         />
         <button
-          className="rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground"
-          onClick={handleSearch}
+          className="rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-60"
+          onClick={() => void handleSearch()}
+          disabled={searching}
         >
           Search
         </button>
       </div>
+      {results.length > 0 && (
+        <div className="absolute left-4 top-16 z-10 w-[320px] overflow-hidden rounded-md border border-border bg-background/95 shadow-lg backdrop-blur-sm">
+          {results.map((result) => (
+            <button
+              key={`${result.label}-${result.lat}-${result.lng}`}
+              className="block w-full px-3 py-2 text-left text-xs hover:bg-accent"
+              onClick={() => {
+                setResults([]);
+                setError("");
+                onPick(result.lat, result.lng);
+              }}
+            >
+              {result.label}
+            </button>
+          ))}
+        </div>
+      )}
       {error && (
         <div className="absolute left-4 top-16 z-10 rounded-md bg-destructive/90 px-3 py-2 text-xs text-destructive-foreground shadow">
           {error}
@@ -2566,322 +1953,306 @@ function MapSearch({
   );
 }
 
-function AirspaceLayer() {
-  const enabled = useAirspaceStore((s) => s.enabled);
-  const zones = useAirspaceStore((s) => s.zones);
-  const fetchForBounds = useAirspaceStore((s) => s.fetchForBounds);
-  const map = useMap();
-  const [hoveredZone, setHoveredZone] = useState<{
-    position: LatLng;
-    name: string;
-    category: string;
-    severity: string;
-  } | null>(null);
+type MapViewChromeProps = {
+  isSatellite: boolean;
+  onSelectStreet: () => void;
+  onSelectSatellite: () => void;
+  is3D: boolean;
+  onSelect2D: () => void;
+  onSelect3D: () => void;
+  showRnbLayer: boolean;
+  onToggleRnbLayer: () => void;
+  showRnbEmptyHint: boolean;
+  scanOptionEnabled: boolean;
+  scanOptionDescription: string;
+  onScanOptionClick: () => void;
+  onClearAll: () => void;
+};
 
-  useEffect(() => {
-    if (!map || !enabled) return;
-    const refresh = () => {
-      const bounds = map.getBounds();
-      if (!bounds) return;
-      fetchForBounds(
-        bounds.getSouthWest().lat(),
-        bounds.getSouthWest().lng(),
-        bounds.getNorthEast().lat(),
-        bounds.getNorthEast().lng(),
-      );
-    };
-
-    refresh();
-    const listener = map.addListener("idle", refresh);
-    return () => listener.remove();
-  }, [map, enabled, fetchForBounds]);
-
-  if (!enabled) return null;
-
+// Bottom-left view switcher, RNB hint and placement toolbar for the
+// open-source map view.
+function MapViewChrome({
+  isSatellite,
+  onSelectStreet,
+  onSelectSatellite,
+  is3D,
+  onSelect2D,
+  onSelect3D,
+  showRnbLayer,
+  onToggleRnbLayer,
+  showRnbEmptyHint,
+  scanOptionEnabled,
+  scanOptionDescription,
+  onScanOptionClick,
+  onClearAll,
+}: MapViewChromeProps) {
   return (
     <>
-      {zones.flatMap((zone) =>
-        geometryToPaths(zone.geometry).map((path, index) => {
-          const color = zone.severity === "prohibited" ? "#ef4444" : "#f97316";
-          return (
-            <PolygonOverlay
-              key={`${zone.id}-${index}`}
-              path={path}
-              strokeColor={color}
-              fillColor={color}
-              fillOpacity={zone.severity === "prohibited" ? 0.22 : 0.16}
-              clickable
-              onClick={(position) => {
-                setHoveredZone({
-                  position,
-                  name: zone.name || zone.id,
-                  category: zone.category || "",
-                  severity: zone.severity,
-                });
-              }}
-            />
-          );
-        }),
+      <div className="absolute bottom-4 left-4 z-10 flex gap-1">
+        <button
+          className={`px-2 py-1 text-xs rounded ${!isSatellite ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+          onClick={onSelectStreet}
+        >
+          Street
+        </button>
+        <button
+          className={`px-2 py-1 text-xs rounded ${isSatellite ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+          onClick={onSelectSatellite}
+        >
+          Satellite
+        </button>
+        <div className="w-px bg-border mx-1" />
+        <button
+          className={`px-2 py-1 text-xs rounded ${!is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+          onClick={onSelect2D}
+        >
+          2D
+        </button>
+        <button
+          className={`px-2 py-1 text-xs rounded ${is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+          onClick={onSelect3D}
+        >
+          3D
+        </button>
+        <div className="w-px bg-border mx-1" />
+        <button
+          className={`px-2 py-1 text-xs rounded ${showRnbLayer ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+          onClick={onToggleRnbLayer}
+        >
+          Bâtiments 2D
+        </button>
+      </div>
+
+      {showRnbEmptyHint && (
+        <div className="absolute bottom-16 left-4 z-10 rounded-md border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-lg">
+          Aucune donnée RNB visible ici. Le référentiel couvre la France.
+        </div>
       )}
-      {hoveredZone && (
-        <InfoWindowOverlay
-          position={hoveredZone.position}
-          content={`<div style="font-size:12px;min-width:160px"><div style="font-weight:600">${hoveredZone.name}</div><div style="color:#9ca3af;text-transform:capitalize">${hoveredZone.category.replace(/-/g, " ")}</div><div style="color:${hoveredZone.severity === "prohibited" ? "#f87171" : "#fb923c"};font-weight:600">${hoveredZone.severity === "prohibited" ? "Prohibited" : "Restricted"}</div></div>`}
-          onClose={() => setHoveredZone(null)}
+
+      <MapToolbar
+        selectedBuildingScanOption={{
+          enabled: scanOptionEnabled,
+          description: scanOptionDescription,
+          onClick: onScanOptionClick,
+        }}
+        onClearAll={onClearAll}
+      />
+    </>
+  );
+}
+
+type MapTransientOverlaysProps = {
+  templateMode: TemplateMode;
+  rawPath: [number, number][];
+  templateConfirmed: boolean;
+  drawingVertices: [number, number][];
+  onFinishPencil: () => void;
+  onCancelPencil: () => void;
+  onFinishObstacle: () => void;
+  onCancelObstacle: () => void;
+  activeTemplateType: TemplateMode;
+  templatePreview: TemplateResult | null;
+  orbitParams: OrbitParams | null;
+  gridParams: GridParams | null;
+  facadeParams: FacadeParams | null;
+  pencilParams: PencilParams | null;
+  onOrbitChange: (params: OrbitParams) => void;
+  onGridChange: (params: GridParams) => void;
+  onFacadeChange: (params: FacadeParams) => void;
+  onPencilChange: (params: PencilParams) => void;
+  onApply: () => void;
+  onCancel: () => void;
+  onFacadeAssist?: () => void;
+  onFacadeObjectiveChange?: (objective: FacadeCopilotObjective) => void;
+  onReconstructionPresetSelect?: (presetId: string) => void;
+  onFacadeSegmentSelect?: (segmentId: string) => void;
+  onFacadeVariantSelect?: (variantId: string) => void;
+  facadeObjective?: FacadeCopilotObjective;
+  facadeAssistBusy?: boolean;
+  facadeAssistMessage?: string | null;
+  facadeRecommendationBusy?: boolean;
+  facadeRecommendation?: FacadeCopilotRecommendation | null;
+  reconstructionShell: ReconstructedBuildingShell | null;
+  reconstructionPresets: Array<{
+    id: string;
+    label: string;
+    detail: string;
+    description: string;
+  }>;
+  facadeSegmentOptions: FacadeSegmentOption[];
+  selectedFacadeSegmentId: string | null;
+  facadeVariantOptions: FacadeVariantOption[];
+  selectedFacadeVariantId: string | null;
+  pois: PointOfInterest[];
+};
+
+// Pencil/obstacle finish buttons and template configuration panel. Shared by
+// the Google 3D view and the open-source 2D view.
+function MapTransientOverlays({
+  templateMode,
+  rawPath,
+  templateConfirmed,
+  drawingVertices,
+  onFinishPencil,
+  onCancelPencil,
+  onFinishObstacle,
+  onCancelObstacle,
+  activeTemplateType,
+  templatePreview,
+  orbitParams,
+  gridParams,
+  facadeParams,
+  pencilParams,
+  onOrbitChange,
+  onGridChange,
+  onFacadeChange,
+  onPencilChange,
+  onApply,
+  onCancel,
+  onFacadeAssist,
+  onFacadeObjectiveChange,
+  onReconstructionPresetSelect,
+  onFacadeSegmentSelect,
+  onFacadeVariantSelect,
+  facadeObjective,
+  facadeAssistBusy,
+  facadeAssistMessage,
+  facadeRecommendationBusy,
+  facadeRecommendation,
+  reconstructionShell,
+  reconstructionPresets,
+  facadeSegmentOptions,
+  selectedFacadeSegmentId,
+  facadeVariantOptions,
+  selectedFacadeVariantId,
+  pois,
+}: MapTransientOverlaysProps) {
+  return (
+    <>
+      {templateMode === "pencil" &&
+        rawPath.length >= 2 &&
+        !templateConfirmed && (
+          <div className="absolute right-4 top-4 z-10 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
+            <button
+              className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
+              onClick={onFinishPencil}
+            >
+              Finish path
+            </button>
+            <button
+              className="rounded-md border border-border px-3 py-2 text-xs"
+              onClick={onCancelPencil}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
+      {drawingVertices.length >= 3 && (
+        <div className="absolute right-4 top-4 z-10 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
+          <button
+            className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
+            onClick={onFinishObstacle}
+          >
+            Finish obstacle
+          </button>
+          <button
+            className="rounded-md border border-border px-3 py-2 text-xs"
+            onClick={onCancelObstacle}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {activeTemplateType && templatePreview && (
+        <TemplateConfigPanel
+          type={activeTemplateType}
+          orbitParams={orbitParams}
+          gridParams={gridParams}
+          facadeParams={facadeParams}
+          pencilParams={pencilParams}
+          onOrbitChange={onOrbitChange}
+          onGridChange={onGridChange}
+          onFacadeChange={onFacadeChange}
+          onPencilChange={onPencilChange}
+          onApply={onApply}
+          onCancel={onCancel}
+          onFacadeAssist={
+            activeTemplateType === "facade" ? onFacadeAssist : undefined
+          }
+          onFacadeObjectiveChange={
+            activeTemplateType === "facade"
+              ? onFacadeObjectiveChange
+              : undefined
+          }
+          onReconstructionPresetSelect={
+            activeTemplateType === "facade" && reconstructionPresets.length > 0
+              ? onReconstructionPresetSelect
+              : undefined
+          }
+          onFacadeSegmentSelect={
+            activeTemplateType === "facade" ? onFacadeSegmentSelect : undefined
+          }
+          onFacadeVariantSelect={
+            activeTemplateType === "facade" ? onFacadeVariantSelect : undefined
+          }
+          facadeAssistBusy={facadeAssistBusy}
+          facadeObjective={
+            activeTemplateType === "facade" ? facadeObjective : undefined
+          }
+          facadeAssistMessage={
+            activeTemplateType === "facade" ? facadeAssistMessage : null
+          }
+          facadeRecommendationBusy={
+            activeTemplateType === "facade" ? facadeRecommendationBusy : false
+          }
+          facadeRecommendation={
+            activeTemplateType === "facade" ? facadeRecommendation : null
+          }
+          reconstructionInfo={
+            activeTemplateType === "facade" && reconstructionShell
+              ? {
+                  estimatedHeightLabel: `${Math.round(reconstructionShell.estimatedHeightM)}m`,
+                  confidenceLabel: `${reconstructionShell.confidencePercent}%`,
+                  roofLabel: reconstructionShell.roofStyleLabel,
+                  sourceSummary: reconstructionShell.sourceSummary,
+                  note: reconstructionShell.note,
+                }
+              : null
+          }
+          reconstructionPresets={
+            activeTemplateType === "facade" ? reconstructionPresets : undefined
+          }
+          facadeSegments={
+            activeTemplateType === "facade"
+              ? facadeSegmentOptions.map((segment) => ({
+                  id: segment.id,
+                  label: segment.label,
+                  detail: `${segment.lengthM.toFixed(0)}m • ${segment.distanceToHintM.toFixed(0)}m off`,
+                  selected: segment.id === selectedFacadeSegmentId,
+                }))
+              : undefined
+          }
+          facadeVariants={
+            activeTemplateType === "facade"
+              ? facadeVariantOptions.map((variant) => ({
+                  id: variant.id,
+                  label: variant.label,
+                  detail: variant.detail,
+                  selected: variant.id === selectedFacadeVariantId,
+                }))
+              : undefined
+          }
+          waypointCount={templatePreview.waypoints.length}
+          pois={pois}
         />
       )}
     </>
   );
 }
 
-function MapInteraction({
-  targetTilt,
-  templateMode,
-  dragState,
-  setDragState,
-  rawPath,
-  setRawPath,
-  setOrbitParams,
-  setGridParams,
-  setFacadeParams,
-  setPencilParams,
-  setTemplateConfirmed,
-  rnbSelectionEnabled,
-  rnbBuildings,
-  onSelectRnbBuilding,
-  onClearRnbSelection,
-}: {
-  targetTilt: number;
-  templateMode: TemplateMode;
-  dragState: { start: [number, number]; end: [number, number] } | null;
-  setDragState: (
-    state: { start: [number, number]; end: [number, number] } | null,
-  ) => void;
-  rawPath: [number, number][];
-  setRawPath: (path: [number, number][]) => void;
-  setOrbitParams: (value: OrbitParams | null) => void;
-  setGridParams: (value: GridParams | null) => void;
-  setFacadeParams: (value: FacadeParams | null) => void;
-  setPencilParams: (value: PencilParams | null) => void;
-  setTemplateConfirmed: (value: boolean) => void;
-  rnbSelectionEnabled: boolean;
-  rnbBuildings: RnbBuilding[];
-  onSelectRnbBuilding: (
-    building: RnbBuilding,
-    position: google.maps.LatLngLiteral,
-  ) => void;
-  onClearRnbSelection: () => void;
-}) {
-  const map = useMap();
-  const isAddingWaypoint = useMissionStore((s) => s.isAddingWaypoint);
-  const isAddingPoi = useMissionStore((s) => s.isAddingPoi);
-  const isDrawingObstacle = useMissionStore((s) => s.isDrawingObstacle);
-  const drawingVertices = useMissionStore((s) => s.drawingVertices);
-  const addWaypoint = useMissionStore((s) => s.addWaypoint);
-  const addPoi = useMissionStore((s) => s.addPoi);
-  const addObstacle = useMissionStore((s) => s.addObstacle);
-  const setDrawingVertices = useMissionStore((s) => s.setDrawingVertices);
-  const setIsDrawingObstacle = useMissionStore((s) => s.setIsDrawingObstacle);
-
-  useEffect(() => {
-    if (!map) return;
-    map.setTilt(targetTilt);
-    if (targetTilt === 0) {
-      map.setHeading(0);
-    }
-    map.setOptions({
-      tiltInteractionEnabled: targetTilt > 0,
-      headingInteractionEnabled: targetTilt > 0,
-    });
-  }, [map, targetTilt]);
-
-  useEffect(() => {
-    if (!map) return;
-
-    const handleClick = map.addListener(
-      "click",
-      (event: google.maps.MapMouseEvent) => {
-        if (!event.latLng) return;
-        const point: [number, number] = [
-          event.latLng.lat(),
-          event.latLng.lng(),
-        ];
-
-        if (
-          templateMode === "orbit" ||
-          templateMode === "grid" ||
-          templateMode === "facade"
-        ) {
-          if (!dragState) {
-            setDragState({ start: point, end: point });
-            return;
-          }
-
-          const nextState = { start: dragState.start, end: point };
-          const distance = haversine(
-            nextState.start[0],
-            nextState.start[1],
-            nextState.end[0],
-            nextState.end[1],
-          );
-          if (distance < 5) return;
-
-          if (templateMode === "orbit") {
-            setOrbitParams({
-              ...DEFAULT_ORBIT_PARAMS,
-              center: nextState.start,
-              radiusM: Math.round(distance),
-            });
-          } else if (templateMode === "grid") {
-            setGridParams({
-              ...DEFAULT_GRID_PARAMS,
-              corner1: nextState.start,
-              corner2: nextState.end,
-            });
-          } else {
-            setFacadeParams({
-              ...DEFAULT_FACADE_PARAMS,
-              point1: nextState.start,
-              point2: nextState.end,
-            });
-          }
-
-          setTemplateConfirmed(true);
-          setDragState(nextState);
-          return;
-        }
-
-        if (templateMode === "pencil") {
-          setRawPath([...rawPath, point]);
-          return;
-        }
-
-        if (isDrawingObstacle) {
-          if (drawingVertices.length >= 3) {
-            const [firstLat, firstLng] = drawingVertices[0];
-            if (haversine(firstLat, firstLng, point[0], point[1]) < 5) {
-              addObstacle(drawingVertices);
-              return;
-            }
-          }
-          setDrawingVertices([...drawingVertices, point]);
-          return;
-        }
-
-        if (rnbSelectionEnabled) {
-          const selectedBuilding = findSelectableRnbBuilding(
-            { lat: point[0], lng: point[1] },
-            rnbBuildings,
-          );
-
-          if (selectedBuilding) {
-            onSelectRnbBuilding(selectedBuilding, {
-              lat: point[0],
-              lng: point[1],
-            });
-            return;
-          }
-        }
-
-        if (isAddingWaypoint) {
-          addWaypoint(point[0], point[1]);
-          return;
-        }
-
-        if (isAddingPoi) {
-          addPoi(point[0], point[1]);
-          return;
-        }
-
-        if (rnbSelectionEnabled) {
-          onClearRnbSelection();
-        }
-      },
-    );
-
-    const handleMouseMove = map.addListener(
-      "mousemove",
-      (event: google.maps.MapMouseEvent) => {
-        if (
-          !event.latLng ||
-          !dragState ||
-          !(
-            templateMode === "orbit" ||
-            templateMode === "grid" ||
-            templateMode === "facade"
-          )
-        ) {
-          return;
-        }
-        setDragState({
-          start: dragState.start,
-          end: [event.latLng.lat(), event.latLng.lng()],
-        });
-      },
-    );
-
-    const handleDoubleClick = map.addListener("dblclick", () => {
-      if (templateMode === "pencil" && rawPath.length >= 2) {
-        if (pathLength(rawPath) >= MIN_PENCIL_PATH_LENGTH_M) {
-          setPencilParams({ ...DEFAULT_PENCIL_PARAMS, path: rawPath });
-          setTemplateConfirmed(true);
-        }
-        return;
-      }
-
-      if (isDrawingObstacle && drawingVertices.length >= 3) {
-        addObstacle(drawingVertices);
-      }
-    });
-
-    return () => {
-      handleClick.remove();
-      handleMouseMove.remove();
-      handleDoubleClick.remove();
-    };
-  }, [
-    map,
-    templateMode,
-    dragState,
-    rawPath,
-    setRawPath,
-    setDragState,
-    setOrbitParams,
-    setGridParams,
-    setFacadeParams,
-    setPencilParams,
-    setTemplateConfirmed,
-    isAddingWaypoint,
-    isAddingPoi,
-    isDrawingObstacle,
-    drawingVertices,
-    addWaypoint,
-    addPoi,
-    addObstacle,
-    setDrawingVertices,
-    rnbSelectionEnabled,
-    rnbBuildings,
-    onSelectRnbBuilding,
-    onClearRnbSelection,
-  ]);
-
-  useEffect(() => {
-    if (!isDrawingObstacle) return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setDrawingVertices([]);
-        setIsDrawingObstacle(false);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [isDrawingObstacle, setDrawingVertices, setIsDrawingObstacle]);
-
-  return null;
-}
-
 export function MapView() {
-  const googleMapsApiKey = useConfigStore((s) => s.googleMapsApiKey);
   const defaultMapView = useConfigStore((s) => s.defaultMapView);
   const waypoints = useMissionStore((s) => s.waypoints);
   const pois = useMissionStore((s) => s.pois);
@@ -2907,10 +2278,13 @@ export function MapView() {
   const setDrawingVertices = useMissionStore((s) => s.setDrawingVertices);
   const setIsDrawingObstacle = useMissionStore((s) => s.setIsDrawingObstacle);
   const setTemplateMode = useMissionStore((s) => s.setTemplateMode);
-  const vizPrefs = usePreferencesStore((s) => s.preferences?.visualization);
+  const isAddingWaypoint = useMissionStore((s) => s.isAddingWaypoint);
+  const isAddingPoi = useMissionStore((s) => s.isAddingPoi);
+  const isDrawingObstacle = useMissionStore((s) => s.isDrawingObstacle);
+  const addWaypoint = useMissionStore((s) => s.addWaypoint);
+  const addPoi = useMissionStore((s) => s.addPoi);
 
-  const [mapTypeId, setMapTypeId] =
-    useState<google.maps.MapTypeId>(ROADMAP_TYPE);
+  const [mapTypeId, setMapTypeId] = useState<string>(ROADMAP_TYPE);
   const [is3D, setIs3D] = useState(false);
   const [searchValue, setSearchValue] = useState("");
   const [ctrlHeld, setCtrlHeld] = useState(false);
@@ -2926,9 +2300,6 @@ export function MapView() {
   const [pencilParams, setPencilParams] = useState<PencilParams | null>(null);
   const [detectedBuilding, setDetectedBuilding] =
     useState<DetectedBuilding | null>(null);
-  const [detectedBuildingCandidates, setDetectedBuildingCandidates] = useState<
-    DetectedBuilding[]
-  >([]);
   const [facadeAssistSeedParams, setFacadeAssistSeedParams] =
     useState<FacadeParams | null>(null);
   const [facadeSegmentOptions, setFacadeSegmentOptions] = useState<
@@ -2971,8 +2342,6 @@ export function MapView() {
     useState<BuildingScanMode>("reconstruction-3d");
   const [selectedBuildingScanVariantId, setSelectedBuildingScanVariantId] =
     useState<string>("balanced");
-  const [streetViewContext, setStreetViewContext] =
-    useState<StreetViewContext | null>(null);
   const [mainMapViewport, setMainMapViewport] =
     useState<MainMapViewport | null>(null);
   const programmaticTemplateModeRef = useRef<TemplateMode>(null);
@@ -3207,48 +2576,14 @@ export function MapView() {
       ? (selectedBuildingScanPreview?.mission ?? null)
       : null;
 
-  const mapPreviewLabel = activeTemplateType
-    ? `Current ${activeTemplateType} template`
-    : showSelectedBuildingScanPanel
-      ? (selectedBuildingScanPreview?.label ?? null)
-      : null;
-
-  const buildings3DView = useMemo(
-    () =>
-      buildBuildings3DView({
-        templatePreview,
-        activeTemplateType,
-        detectedBuilding,
-        selectedSegment: selectedFacadeSegment,
-        facadeParams,
-        selectedWaypoint: singleSelectedWaypoint,
-        selectedWaypointHeading: singleSelectedWaypoint
-          ? resolveWaypointHeading(singleSelectedWaypoint, pois)
-          : null,
-        mainMapViewport,
-        defaultMapView,
-      }),
-    [
-      activeTemplateType,
-      defaultMapView,
-      detectedBuilding,
-      facadeParams,
-      mainMapViewport,
-      pois,
-      selectedFacadeSegment,
-      singleSelectedWaypoint,
-      templatePreview,
-    ],
-  );
-
   const reconstructionShell = useMemo(
     () =>
       buildApproximateBuildingShell(
         detectedBuilding,
         selectedFacadeSegment,
-        streetViewContext,
+        null,
       ),
-    [detectedBuilding, selectedFacadeSegment, streetViewContext],
+    [detectedBuilding, selectedFacadeSegment],
   );
 
   const buildings3DMarkers = useMemo(
@@ -3257,14 +2592,9 @@ export function MapView() {
         detectedBuilding,
         selectedSegment: selectedFacadeSegment,
         facadeRecommendation,
-        streetViewContext,
+        streetViewContext: null,
       }),
-    [
-      detectedBuilding,
-      facadeRecommendation,
-      selectedFacadeSegment,
-      streetViewContext,
-    ],
+    [detectedBuilding, facadeRecommendation, selectedFacadeSegment],
   );
 
   const selectedRnbCentroidPosition = useMemo<LatLng | null>(() => {
@@ -3285,59 +2615,6 @@ export function MapView() {
     setSelectedBdnbBuilding(null);
     setSelectedRnbBuildingLoading(false);
   }, []);
-
-  const contextShells = useMemo(() => {
-    if (!showRnbLayer && !detectedBuilding) {
-      return [] as Array<{ id: string; shell: ReconstructedBuildingShell }>;
-    }
-
-    return detectedBuildingCandidates
-      .filter((candidate) => candidate.id !== detectedBuilding?.id)
-      .map((candidate) => ({
-        id: candidate.id,
-        shell: buildApproximateBuildingShell(candidate, null, null),
-      }))
-      .filter(
-        (
-          candidate,
-        ): candidate is { id: string; shell: ReconstructedBuildingShell } =>
-          candidate.shell !== null,
-      );
-  }, [detectedBuilding, detectedBuildingCandidates, showRnbLayer]);
-
-  const scanRoute3D = useMemo<Buildings3DScanRoute | null>(() => {
-    const previewWaypoints = mapPreview?.waypoints ?? [];
-    const routeWaypoints =
-      previewWaypoints.length > 0 ? previewWaypoints : waypoints;
-
-    if (routeWaypoints.length === 0) return null;
-
-    return {
-      title:
-        previewWaypoints.length > 0 && mapPreviewLabel
-          ? mapPreviewLabel
-          : "Current mission route",
-      path: routeWaypoints.map((waypoint) => ({
-        lat: waypoint.latitude,
-        lng: waypoint.longitude,
-        altitude: Math.max(0, waypoint.height),
-      })),
-      waypointMarkers: routeWaypoints.map((waypoint, index) => ({
-        id: `scan-waypoint-${index + 1}`,
-        position: {
-          lat: waypoint.latitude,
-          lng: waypoint.longitude,
-          altitude: Math.max(0, waypoint.height),
-        },
-        glyph: String(index + 1),
-        label: `Waypoint ${index + 1}`,
-        background: "#f59e0b",
-        borderColor: "#fde68a",
-        glyphColor: "#431407",
-        scale: 0.92,
-      })),
-    };
-  }, [mapPreview, mapPreviewLabel, waypoints]);
 
   useEffect(() => {
     if (!showRnbLayer) {
@@ -3409,27 +2686,6 @@ export function MapView() {
   }, [selectedRnbBuilding]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    if (!detectedBuilding) {
-      setStreetViewContext(null);
-      return;
-    }
-
-    void resolveStreetViewContext(detectedBuilding, selectedFacadeSegment).then(
-      (context) => {
-        if (!cancelled) {
-          setStreetViewContext(context);
-        }
-      },
-    );
-
-    return () => {
-      cancelled = true;
-    };
-  }, [detectedBuilding, selectedFacadeSegment]);
-
-  useEffect(() => {
     if (!is3D || !showRnbLayer || !mainMapViewport || detectedBuilding) {
       return;
     }
@@ -3477,17 +2733,18 @@ export function MapView() {
         );
 
         if (!cancelled) {
-          setDetectedBuildingCandidates(response.candidates);
+          // Keep the cache warm for later assists, even though the editor no
+          // longer renders the full candidate cloud explicitly.
         }
       } catch {
-        const cachedResponse = findCachedBuildingDetection(
+        findCachedBuildingDetection(
           buildingDetectionCacheRef,
           queryCenter,
           radiusM,
         );
 
         if (!cancelled) {
-          setDetectedBuildingCandidates(cachedResponse?.candidates ?? []);
+          // No explicit candidate rendering in the open-source map view.
         }
       }
     })();
@@ -3520,7 +2777,6 @@ export function MapView() {
     setFacadeParams(null);
     setPencilParams(null);
     setDetectedBuilding(null);
-    setDetectedBuildingCandidates([]);
     setFacadeAssistSeedParams(null);
     setFacadeSegmentOptions([]);
     setSelectedFacadeSegmentId(null);
@@ -3530,7 +2786,6 @@ export function MapView() {
     setFacadeAssistMessage(null);
     setFacadeRecommendation(null);
     setFacadeRecommendationBusy(false);
-    setStreetViewContext(null);
   }, []);
 
   const clearTransientMapUi = useCallback(() => {
@@ -3668,7 +2923,6 @@ export function MapView() {
           }
         }
 
-        setDetectedBuildingCandidates(response.candidates);
         const scenario = applyFacadeScenario(response.building, seedParams);
         if (!scenario) {
           throw new Error("Detected building has no usable facade segment");
@@ -3695,7 +2949,6 @@ export function MapView() {
         return { response, scenario, recommendation };
       } catch (error) {
         setDetectedBuilding(null);
-        setDetectedBuildingCandidates([]);
         setFacadeSegmentOptions([]);
         setSelectedFacadeSegmentId(null);
         setFacadeVariantOptions([]);
@@ -3734,14 +2987,12 @@ export function MapView() {
       setFacadeParams(seedParams);
       setFacadeAssistSeedParams(seedParams);
       setDetectedBuilding(null);
-      setDetectedBuildingCandidates([]);
       setFacadeSegmentOptions([]);
       setSelectedFacadeSegmentId(null);
       setFacadeVariantOptions([]);
       setSelectedFacadeVariantId(null);
       setFacadeRecommendation(null);
       setFacadeRecommendationBusy(false);
-      setStreetViewContext(null);
       setFacadeObjective(RECONSTRUCTION_DEMO_PRESET.objective);
       setSearchValue(RECONSTRUCTION_DEMO_PRESET.searchLabel);
       setMapTypeId(HYBRID_TYPE);
@@ -3813,7 +3064,6 @@ export function MapView() {
       setRawPath([]);
       setTemplateConfirmed(true);
       setDetectedBuilding(null);
-      setDetectedBuildingCandidates([]);
       setFacadeAssistSeedParams(null);
       setFacadeSegmentOptions([]);
       setSelectedFacadeSegmentId(null);
@@ -3822,7 +3072,6 @@ export function MapView() {
       setFacadeAssistBusy(false);
       setFacadeRecommendation(null);
       setFacadeRecommendationBusy(false);
-      setStreetViewContext(null);
 
       if (preset.templateType === "grid" && preset.gridParams) {
         setOrbitParams(null);
@@ -3906,7 +3155,7 @@ export function MapView() {
   ]);
 
   const handleSelectRnbBuilding = useCallback(
-    (building: RnbBuilding, position: google.maps.LatLngLiteral) => {
+    (building: RnbBuilding, position: LatLng) => {
       setSelectedRnbBuilding({ building, position });
       setShowSelectedRnbInfo(true);
     },
@@ -3926,41 +3175,15 @@ export function MapView() {
     setShowSelectedBuildingScanPanel(true);
   }, [selectedRnbBuilding]);
 
-  // If 3D is requested, prefer Google Maps (requires API key). For 2D we use
-  // an open MapLibre/Mapbox GL view with OpenStreetMap raster tiles.
-  const showGoogle3D = is3D;
+  // Single open-source map engine (MapLibre): 2D street map with buildings,
+  // or 3D with terrain relief + extruded buildings when is3D is set.
 
-  if (showGoogle3D && !googleMapsApiKey) {
-    return (
-      <div className="relative h-full w-full flex items-center justify-center bg-background text-muted-foreground">
-        <p>
-          Google Maps API key not configured. Add GOOGLE_MAPS_API_KEY or
-          VITE_GOOGLE_MAPS_API_KEY to your environment to enable 3D view.
-        </p>
-      </div>
-    );
-  }
+  // These hooks must run unconditionally on every render (never after an
+  // early return): switching between the 2D and 3D views would otherwise
+  // change the hook order and crash React.
+  const mapRef = useRef<any>(null);
 
-  // Prepare a minimal Mapbox style using OpenStreetMap raster tiles
-  const osmStyle = {
-    version: 8,
-    sources: {
-      osm: {
-        type: "raster",
-        tiles: ["https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"],
-        tileSize: 256,
-      },
-    },
-    layers: [
-      {
-        id: "osm-tiles",
-        type: "raster",
-        source: "osm",
-      },
-    ],
-  } as any;
-
-  // GeoJSON for route and points (used in 2D OSM view)
+  // GeoJSON for route and points (used in the 2D open-source view)
   const routeGeo = useMemo(() => {
     return {
       type: "FeatureCollection",
@@ -3987,447 +3210,806 @@ export function MapView() {
     } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
   }, [waypoints]);
 
-  if (!showGoogle3D) {
-    const mapRef = useRef<any>(null);
-    return (
-      <div className="relative h-full w-full">
-        <MapGL
-          ref={mapRef}
-          initialViewState={{
-            longitude: defaultMapView.longitude,
-            latitude: defaultMapView.latitude,
-            zoom: defaultMapView.zoom,
-          }}
-          mapLib={maplibregl}
-          mapStyle={osmStyle}
-          style={{ width: "100%", height: "100%" }}
-        >
-          <Source id="route" type="geojson" data={routeGeo}>
+  // GeoJSON for POIs, obstacles and the obstacle-drawing preview (2D view)
+  const poisGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: pois.map((p) => ({
+        type: "Feature",
+        properties: { id: p.id, name: p.name },
+        geometry: { type: "Point", coordinates: [p.longitude, p.latitude] },
+      })),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [pois]);
+
+  const obstaclesGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: obstacles
+        .filter((o) => o.vertices.length >= 3)
+        .map((o) => {
+          const ring = o.vertices.map(
+            ([lat, lng]) => [lng, lat] as [number, number],
+          );
+          ring.push(ring[0]);
+          return {
+            type: "Feature",
+            properties: { id: o.id, name: o.name },
+            geometry: { type: "Polygon", coordinates: [ring] },
+          };
+        }),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [obstacles]);
+
+  const drawingPreviewGeo = useMemo(() => {
+    if (drawingVertices.length === 0) return null;
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "LineString",
+            coordinates: drawingVertices.map(([lat, lng]) => [lng, lat]),
+          },
+        },
+      ],
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [drawingVertices]);
+
+  // Dashed flight segments (blue, red where the path conflicts with an
+  // obstacle) for the open-source view.
+  const flightSegmentsGeo = useMemo(() => {
+    const normal: [number, number][][] = [];
+    const warned: [number, number][][] = [];
+    waypoints.slice(0, -1).forEach((waypoint, index) => {
+      const next = waypoints[index + 1];
+      const segment: [number, number][] = [
+        [waypoint.longitude, waypoint.latitude],
+        [next.longitude, next.latitude],
+      ];
+      if (warningSegments.has(waypoint.index)) warned.push(segment);
+      else normal.push(segment);
+    });
+    const toCollection = (segments: [number, number][][]) =>
+      ({
+        type: "FeatureCollection",
+        features: segments.map((coordinates) => ({
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates },
+        })),
+      }) as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+    return { normal: toCollection(normal), warned: toCollection(warned) };
+  }, [waypoints, warningSegments]);
+
+  // Green dashed lines from "toward POI" waypoints to their POI.
+  const poiLinesGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: waypoints.flatMap((waypoint) => {
+        const targetPoi =
+          waypoint.headingMode === "towardPOI" && waypoint.poiId
+            ? pois.find((poi) => poi.id === waypoint.poiId)
+            : null;
+        if (!targetPoi) return [];
+        return [
+          {
+            type: "Feature",
+            properties: {},
+            geometry: {
+              type: "LineString",
+              coordinates: [
+                [waypoint.longitude, waypoint.latitude],
+                [targetPoi.longitude, targetPoi.latitude],
+              ],
+            },
+          },
+        ];
+      }),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [waypoints, pois]);
+
+  // Red heading indicators for waypoints with an explicit heading.
+  const headingLinesGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: waypointHeadings
+        .filter(({ waypoint }) => hasExplicitHeading(waypoint))
+        .map(({ waypoint, heading }) => ({
+          type: "Feature",
+          properties: {
+            selected: selectedWaypointIndices.has(waypoint.index),
+          },
+          geometry: {
+            type: "LineString",
+            coordinates: headingPath(waypoint, heading).map(
+              (p): [number, number] => [p.lng, p.lat],
+            ),
+          },
+        })),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [waypointHeadings, selectedWaypointIndices]);
+
+  // Camera frustum footprint for the single selected waypoint.
+  const frustumGeo = useMemo(() => {
+    if (!singleSelectedWaypoint || !frustumCorners) return null;
+    const ring = frustumCorners.map(([lat, lng]): [number, number] => [
+      lng,
+      lat,
+    ]);
+    ring.push(ring[0]);
+    const edges = frustumCorners.map(([lat, lng]) => ({
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [singleSelectedWaypoint.longitude, singleSelectedWaypoint.latitude],
+          [lng, lat],
+        ],
+      },
+    }));
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: { type: "Polygon", coordinates: [ring] },
+        },
+        ...edges,
+      ],
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [singleSelectedWaypoint, frustumCorners]);
+
+  // Detected building footprint + clickable facade segments.
+  const detectedBuildingGeo = useMemo(() => {
+    if (!detectedBuilding) return null;
+    const footprint = detectedBuilding.footprint.map(
+      (point): [number, number] => [point.lng, point.lat],
+    );
+    if (footprint.length >= 3) footprint.push(footprint[0]);
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: { kind: "footprint" },
+          geometry: { type: "Polygon", coordinates: [footprint] },
+        },
+        ...facadeSegmentOptions.map((segment) => ({
+          type: "Feature",
+          properties: {
+            kind: "segment",
+            id: segment.id,
+            selected: segment.id === selectedFacadeSegmentId,
+          },
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              [segment.start.lng, segment.start.lat],
+              [segment.end.lng, segment.end.lat],
+            ],
+          },
+        })),
+      ],
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [detectedBuilding, facadeSegmentOptions, selectedFacadeSegmentId]);
+
+  // Template drag previews + pencil path + generated preview (purple).
+  const templateSketchGeo = useMemo(() => {
+    const lines: [number, number][][] = [];
+    if (dragState && !templateConfirmed) {
+      if (templateMode === "orbit") {
+        lines.push(
+          circlePath(
+            dragState.start,
+            haversine(
+              dragState.start[0],
+              dragState.start[1],
+              dragState.end[0],
+              dragState.end[1],
+            ),
+          ).map((p): [number, number] => [p.lng, p.lat]),
+        );
+      } else if (templateMode === "grid") {
+        const rect = rectanglePath(dragState.start, dragState.end).map(
+          (p): [number, number] => [p.lng, p.lat],
+        );
+        rect.push(rect[0]);
+        lines.push(rect);
+      } else if (templateMode === "facade") {
+        lines.push([
+          [dragState.start[1], dragState.start[0]],
+          [dragState.end[1], dragState.end[0]],
+        ]);
+      }
+    }
+    if (templateMode === "pencil" && rawPath.length >= 2) {
+      lines.push(rawPath.map(([lat, lng]): [number, number] => [lng, lat]));
+    }
+    if (mapPreview) {
+      mapPreview.waypoints.slice(0, -1).forEach((waypoint, index) => {
+        const next = mapPreview.waypoints[index + 1];
+        lines.push([
+          [waypoint.longitude, waypoint.latitude],
+          [next.longitude, next.latitude],
+        ]);
+      });
+    }
+    return {
+      type: "FeatureCollection",
+      features: lines.map((coordinates) => ({
+        type: "Feature",
+        properties: {},
+        geometry: { type: "LineString", coordinates },
+      })),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [dragState, templateConfirmed, templateMode, rawPath, mapPreview]);
+
+  // Transient UI callbacks shared by the map views (used by
+  // MapTransientOverlays).
+  const handleTemplateApply = () => {
+    if (!templatePreview) return;
+    appendWaypoints(templatePreview.waypoints, templatePreview.pois);
+    clearTransientMapUi();
+    setTemplateMode(null);
+  };
+
+  const handleTemplateCancel = () => {
+    clearTransientMapUi();
+    setTemplateMode(null);
+  };
+
+  const handleFinishPencil = () => {
+    if (pathLength(rawPath) < MIN_PENCIL_PATH_LENGTH_M) return;
+    setPencilParams({ ...DEFAULT_PENCIL_PARAMS, path: rawPath });
+    setTemplateConfirmed(true);
+  };
+
+  const handleCancelPencil = () => {
+    clearTransientMapUi();
+    setTemplateMode(null);
+  };
+
+  const handleFinishObstacle = () => {
+    addObstacle(drawingVertices);
+  };
+
+  const handleCancelObstacle = () => {
+    setDrawingVertices([]);
+    setIsDrawingObstacle(false);
+  };
+
+  const handleSelect3D = () => {
+    // 3D always works: Google 3D with a valid key, otherwise open-source
+    // MapLibre 3D (terrain relief + extruded buildings, no key required).
+    setIs3D(true);
+  };
+
+  const handleFacadeSegmentClick = (segmentId: string) => {
+    const seed = facadeAssistSeedParams ?? facadeParams;
+    if (!seed || !detectedBuilding) return;
+    const scenario = applyFacadeScenario(
+      detectedBuilding,
+      seed,
+      segmentId,
+      selectedFacadeVariantId,
+    );
+    if (!scenario) return;
+    setFacadeAssistMessage(
+      `${scenario.selectedSegment.label} selected, ${scenario.selectedVariant.label.toLowerCase()} variant at ${(scenario.selectedVariant.score * 100).toFixed(0)}%.`,
+    );
+  };
+
+  const handleSearchPick = useCallback((lat: number, lng: number) => {
+    mapRef.current?.getMap?.()?.flyTo({ center: [lng, lat], zoom: 15 });
+  }, []);
+
+  // Fit the map to the mission when waypoints first appear.
+  const prevWaypointCountRef = useRef(0);
+  useEffect(() => {
+    const wasEmpty = prevWaypointCountRef.current === 0;
+    prevWaypointCountRef.current = waypoints.length;
+    if (!wasEmpty || waypoints.length < 2) return;
+    const map = mapRef.current?.getMap?.();
+    if (!map) return;
+    const lngs = [
+      ...waypoints.map((w) => w.longitude),
+      ...pois.map((p) => p.longitude),
+      ...obstacles.flatMap((o) => o.vertices.map(([, lng]) => lng)),
+    ];
+    const lats = [
+      ...waypoints.map((w) => w.latitude),
+      ...pois.map((p) => p.latitude),
+      ...obstacles.flatMap((o) => o.vertices.map(([lat]) => lat)),
+    ];
+    if (lngs.length === 0) return;
+    map.fitBounds(
+      [
+        [Math.min(...lngs), Math.min(...lats)],
+        [Math.max(...lngs), Math.max(...lats)],
+      ],
+      { padding: 48 },
+    );
+  }, [waypoints, pois, obstacles]);
+
+  // Publish the viewport for flows that depend on it (RNB auto-detect,
+  // facade assist seeding).
+  useEffect(() => {
+    const map = mapRef.current?.getMap?.();
+    if (!map) return;
+    const publish = () => {
+      const center = map.getCenter();
+      if (!center) return;
+      setMainMapViewport({
+        center: { lat: center.lat, lng: center.lng },
+        zoom: map.getZoom() ?? 15,
+        heading: map.getBearing?.() ?? 0,
+        tilt: map.getPitch?.() ?? 0,
+      });
+    };
+    publish();
+    map.on("moveend", publish);
+    return () => {
+      map.off("moveend", publish);
+    };
+  }, []);
+
+  const handleFacadeObjectiveChange = (objective: FacadeCopilotObjective) => {
+    setFacadeObjective(objective);
+    const seed = facadeAssistSeedParams ?? facadeParams;
+    if (!seed || !detectedBuilding) return;
+    const scenario = buildFacadeScenario(
+      seed,
+      detectedBuilding,
+      selectedFacadeSegmentId,
+      selectedFacadeVariantId,
+    );
+    if (!scenario) return;
+    void (async () => {
+      const recommendation = await refreshFacadeRecommendation(
+        detectedBuilding,
+        scenario,
+      );
+      setFacadeAssistMessage(
+        recommendation
+          ? `Goal switched to ${recommendation.objectiveLabel.toLowerCase()}. Copilot recommends ${recommendation.recommendedVariantLabel.toLowerCase()}.`
+          : "Mission goal updated.",
+      );
+    })();
+  };
+
+  const handleFacadeSegmentSelect = (segmentId: string) => {
+    const seed = facadeAssistSeedParams ?? facadeParams;
+    if (!seed || !detectedBuilding) return;
+    void (async () => {
+      const scenario = applyFacadeScenario(
+        detectedBuilding,
+        seed,
+        segmentId,
+        selectedFacadeVariantId,
+      );
+      if (!scenario) return;
+      const recommendation = await refreshFacadeRecommendation(
+        detectedBuilding,
+        scenario,
+      );
+      setFacadeAssistMessage(
+        recommendation
+          ? `${scenario.selectedSegment.label} selected. Copilot still prefers ${recommendation.recommendedVariantLabel.toLowerCase()}.`
+          : `${scenario.selectedSegment.label} selected, ${scenario.selectedVariant.label.toLowerCase()} variant at ${(scenario.selectedVariant.score * 100).toFixed(0)}%.`,
+      );
+    })();
+  };
+
+  const handleFacadeVariantSelect = (variantId: string) => {
+    const seed = facadeAssistSeedParams ?? facadeParams;
+    if (!seed || !detectedBuilding) return;
+    void (async () => {
+      const scenario = applyFacadeScenario(
+        detectedBuilding,
+        seed,
+        selectedFacadeSegmentId,
+        variantId,
+      );
+      if (!scenario) return;
+      const recommendation = await refreshFacadeRecommendation(
+        detectedBuilding,
+        scenario,
+      );
+      setFacadeAssistMessage(
+        recommendation
+          ? recommendation.currentVariantMatchesRecommendation
+            ? `${scenario.selectedVariant.label} matches the copilot recommendation.`
+            : `${scenario.selectedVariant.label} selected. Copilot recommends ${recommendation.recommendedVariantLabel.toLowerCase()} instead.`
+          : `${scenario.selectedVariant.label} variant selected with ${scenario.selectedVariant.detail}.`,
+      );
+    })();
+  };
+
+  // Open-source basemaps for the MapLibre view (no API key required):
+  // - Street: OpenFreeMap "bright" vector style (roads + building footprints)
+  // - Satellite: Esri World Imagery raster tiles
+  const OPENFREEMAP_BRIGHT_STYLE =
+    "https://tiles.openfreemap.org/styles/bright";
+  const esriImageryStyle = {
+    version: 8,
+    sources: {
+      esri: {
+        type: "raster",
+        tiles: [
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        ],
+        tileSize: 256,
+        maxzoom: 19,
+        attribution:
+          "Esri, Maxar, Earthstar Geographics | © OpenStreetMap contributors",
+      },
+    },
+    layers: [
+      {
+        id: "esri-imagery",
+        type: "raster",
+        source: "esri",
+      },
+    ],
+  } as any;
+
+  // Open-source 3D mode: same map, pitched camera + terrain relief (see
+  // MapLibre3DController) + extruded buildings below.
+  const mapLibre3D = is3D;
+  return (
+    <div className="relative h-full w-full">
+      <MapGL
+        ref={mapRef}
+        initialViewState={{
+          longitude: defaultMapView.longitude,
+          latitude: defaultMapView.latitude,
+          zoom: defaultMapView.zoom,
+          pitch: mapLibre3D ? 60 : 0,
+        }}
+        mapLib={maplibregl as any}
+        mapStyle={
+          mapTypeId === HYBRID_TYPE
+            ? esriImageryStyle
+            : OPENFREEMAP_BRIGHT_STYLE
+        }
+        style={{ width: "100%", height: "100%" }}
+      >
+        <Source id="route" type="geojson" data={routeGeo}>
+          <Layer
+            id="route-line"
+            type="line"
+            paint={{
+              "line-color": "#f59e0b",
+              "line-width": 4,
+            }}
+          />
+        </Source>
+        <Source id="points" type="geojson" data={pointsGeo}>
+          <Layer
+            id="points-circle"
+            type="circle"
+            paint={{
+              "circle-radius": 6,
+              "circle-color": "#2563eb",
+              "circle-stroke-color": "#fff",
+              "circle-stroke-width": 1,
+            }}
+          />
+        </Source>
+        <Source id="pois" type="geojson" data={poisGeo}>
+          <Layer
+            id="pois-circle"
+            type="circle"
+            paint={{
+              "circle-radius": 7,
+              "circle-color": "#0d9488",
+              "circle-stroke-color": "#fff",
+              "circle-stroke-width": 2,
+            }}
+          />
+        </Source>
+        <Source id="obstacles" type="geojson" data={obstaclesGeo}>
+          <Layer
+            id="obstacles-fill"
+            type="fill"
+            paint={{
+              "fill-color": "#ef4444",
+              "fill-opacity": 0.15,
+            }}
+          />
+          <Layer
+            id="obstacles-outline"
+            type="line"
+            paint={{
+              "line-color": "#ef4444",
+              "line-width": 2,
+              "line-dasharray": [2, 2],
+            }}
+          />
+        </Source>
+        {drawingPreviewGeo && (
+          <Source id="drawing-preview" type="geojson" data={drawingPreviewGeo}>
             <Layer
-              id="route-line"
+              id="drawing-preview-line"
               type="line"
               paint={{
-                "line-color": "#f59e0b",
-                "line-width": 4,
+                "line-color": "#ef4444",
+                "line-width": 2,
+                "line-dasharray": [2, 2],
               }}
             />
           </Source>
-          <Source id="points" type="geojson" data={pointsGeo}>
+        )}
+        {/* Dashed flight segments (red on obstacle conflicts) */}
+        <Source
+          id="flight-normal"
+          type="geojson"
+          data={flightSegmentsGeo.normal}
+        >
+          <Layer
+            id="flight-normal-line"
+            type="line"
+            paint={{
+              "line-color": "#3b82f6",
+              "line-width": 3,
+              "line-dasharray": [2, 2],
+            }}
+          />
+        </Source>
+        <Source
+          id="flight-warned"
+          type="geojson"
+          data={flightSegmentsGeo.warned}
+        >
+          <Layer
+            id="flight-warned-line"
+            type="line"
+            paint={{
+              "line-color": "#ef4444",
+              "line-width": 3,
+              "line-dasharray": [2, 2],
+            }}
+          />
+        </Source>
+        {/* Green dashed lines toward POIs */}
+        <Source id="poi-lines" type="geojson" data={poiLinesGeo}>
+          <Layer
+            id="poi-lines-line"
+            type="line"
+            paint={{
+              "line-color": "#4ade80",
+              "line-width": 2,
+              "line-dasharray": [2, 2],
+            }}
+          />
+        </Source>
+        {/* Red heading indicators */}
+        <Source id="heading-lines" type="geojson" data={headingLinesGeo}>
+          <Layer
+            id="heading-lines-line"
+            type="line"
+            paint={{
+              "line-color": "#ef4444",
+              "line-width": ["match", ["get", "selected"], true, 3, 2],
+              "line-opacity": ["match", ["get", "selected"], true, 0.85, 0.45],
+            }}
+          />
+        </Source>
+        {/* Camera frustum footprint for the selected waypoint */}
+        {frustumGeo && (
+          <Source id="frustum" type="geojson" data={frustumGeo}>
             <Layer
-              id="points-circle"
-              type="circle"
+              id="frustum-fill"
+              type="fill"
               paint={{
-                "circle-radius": 6,
-                "circle-color": "#2563eb",
-                "circle-stroke-color": "#fff",
-                "circle-stroke-width": 1,
+                "fill-color": "#94a3b8",
+                "fill-opacity": 0.12,
+              }}
+            />
+            <Layer
+              id="frustum-outline"
+              type="line"
+              paint={{
+                "line-color": "#94a3b8",
+                "line-width": 2,
+                "line-opacity": 0.6,
               }}
             />
           </Source>
-
-          {/* 2D overlays and interaction adapted for MapLibre */}
-          <RnbBuildingsLayer2D
-            enabled={showRnbLayer}
-            buildings={rnbBuildings}
-            selectedBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
-            onBuildingsChange={setRnbBuildings}
-            onSelectBuilding={handleSelectRnbBuilding}
-            mapRef={mapRef}
+        )}
+        {/* Detected building footprint + clickable facade segments */}
+        {detectedBuildingGeo && (
+          <Source
+            id="detected-building"
+            type="geojson"
+            data={detectedBuildingGeo}
+          >
+            <Layer
+              id="detected-building-fill"
+              type="fill"
+              filter={["==", ["get", "kind"], "footprint"]}
+              paint={{
+                "fill-color": "#14b8a6",
+                "fill-opacity": 0.08,
+              }}
+            />
+            <Layer
+              id="detected-building-outline"
+              type="line"
+              filter={["==", ["get", "kind"], "footprint"]}
+              paint={{
+                "line-color": "#14b8a6",
+                "line-width": 2,
+                "line-opacity": 0.8,
+              }}
+            />
+            <Layer
+              id="facade-segments-line"
+              type="line"
+              filter={["==", ["get", "kind"], "segment"]}
+              paint={{
+                "line-color": [
+                  "match",
+                  ["get", "selected"],
+                  true,
+                  "#14b8a6",
+                  "#f59e0b",
+                ],
+                "line-width": ["match", ["get", "selected"], true, 5, 3],
+                "line-opacity": ["match", ["get", "selected"], true, 0.95, 0.7],
+              }}
+            />
+          </Source>
+        )}
+        {/* Template drag previews + pencil path (purple) */}
+        <Source id="template-sketch" type="geojson" data={templateSketchGeo}>
+          <Layer
+            id="template-sketch-line"
+            type="line"
+            paint={{
+              "line-color": "#a78bfa",
+              "line-width": 2,
+              "line-opacity": 0.8,
+            }}
           />
-
-          <MapInteraction2D
-            mapRef={mapRef}
-            targetTilt={is3D ? (mapTypeId === HYBRID_TYPE ? 67.5 : 45) : 0}
-            templateMode={templateMode}
-            dragState={dragState}
-            setDragState={setDragState}
-            rawPath={rawPath}
-            setRawPath={setRawPath}
-            setOrbitParams={setOrbitParams}
-            setGridParams={setGridParams}
-            setFacadeParams={setFacadeParams}
-            setPencilParams={setPencilParams}
-            setTemplateConfirmed={setTemplateConfirmed}
-            rnbSelectionEnabled={showRnbLayer}
-            rnbBuildings={rnbBuildings}
-            onSelectRnbBuilding={handleSelectRnbBuilding}
-            onClearRnbSelection={handleClearSelectedBuilding}
+        </Source>
+        {/* Extruded 3D buildings (OpenFreeMap vector tiles, visible in 3D) */}
+        <Source
+          id="ofm-buildings"
+          type="vector"
+          url="https://tiles.openfreemap.org/planet"
+          maxzoom={14}
+        >
+          <Layer
+            id="buildings-3d"
+            type="fill-extrusion"
+            source-layer="building"
+            minzoom={13}
+            layout={{ visibility: mapLibre3D ? "visible" : "none" }}
+            paint={{
+              "fill-extrusion-color": "#c8ccd2",
+              "fill-extrusion-height": [
+                "coalesce",
+                ["get", "render_height"],
+                12,
+              ],
+              "fill-extrusion-base": [
+                "coalesce",
+                ["get", "render_min_height"],
+                0,
+              ],
+              "fill-extrusion-opacity": 0.85,
+            }}
           />
+        </Source>
+        <MapLibre3DController active={mapLibre3D} />
+        <AirspaceOverlay />
 
-          {/* Waypoint markers */}
-          {waypoints.map((wp, i) => (
+        {/* 2D overlays and interaction adapted for MapLibre */}
+        <RnbBuildingsLayer2D
+          enabled={showRnbLayer}
+          buildings={rnbBuildings}
+          selectedBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
+          onBuildingsChange={setRnbBuildings}
+          onSelectBuilding={handleSelectRnbBuilding}
+          mapRef={mapRef}
+        />
+
+        <MapInteraction2D
+          mapRef={mapRef}
+          targetTilt={is3D ? (mapTypeId === HYBRID_TYPE ? 67.5 : 45) : 0}
+          templateMode={templateMode}
+          dragState={dragState}
+          setDragState={setDragState}
+          rawPath={rawPath}
+          setRawPath={setRawPath}
+          setOrbitParams={setOrbitParams}
+          setGridParams={setGridParams}
+          setFacadeParams={setFacadeParams}
+          setPencilParams={setPencilParams}
+          setTemplateConfirmed={setTemplateConfirmed}
+          rnbSelectionEnabled={showRnbLayer}
+          rnbBuildings={rnbBuildings}
+          onSelectRnbBuilding={handleSelectRnbBuilding}
+          onClearRnbSelection={handleClearSelectedBuilding}
+          isAddingWaypoint={isAddingWaypoint}
+          isAddingPoi={isAddingPoi}
+          isDrawingObstacle={isDrawingObstacle}
+          drawingVertices={drawingVertices}
+          addWaypoint={addWaypoint}
+          addPoi={addPoi}
+          addObstacle={addObstacle}
+          setDrawingVertices={setDrawingVertices}
+          selectObstacle={selectObstacle}
+          onFacadeSegmentClick={handleFacadeSegmentClick}
+        />
+
+        {/* Waypoint markers (draggable, click to select) */}
+        {waypoints.map((waypoint, i) => {
+          const selected = selectedWaypointIndices.has(waypoint.index);
+          return (
             <GLMarker
-              key={`wp-${i}`}
-              longitude={wp.longitude}
-              latitude={wp.latitude}
+              key={`wp-${waypoint.index}`}
+              longitude={waypoint.longitude}
+              latitude={waypoint.latitude}
               anchor="center"
+              draggable
+              onDragEnd={(e: any) =>
+                moveWaypoint(waypoint.index, e.lngLat.lat, e.lngLat.lng)
+              }
+              onClick={(e: any) => {
+                e.originalEvent.stopPropagation();
+                selectWaypoint(
+                  waypoint.index,
+                  selectionModeFromEvent({
+                    originalEvent: e.originalEvent,
+                  }),
+                );
+              }}
             >
               <div
-                title={`${wp.name}\nAlt: ${wp.height}m`}
+                title={`${waypoint.name}\nAlt: ${waypoint.height}m | Speed: ${waypoint.speed}m/s\nGimbal: ${waypoint.gimbalPitchAngle}°\n${waypoint.latitude.toFixed(6)}, ${waypoint.longitude.toFixed(6)}`}
                 style={{
+                  width: 20,
+                  height: 20,
+                  borderRadius: 10,
+                  background: selected ? "#3b82f6" : "#f59e0b",
+                  border: `2px solid ${selected ? "#93c5fd" : "#7c2d12"}`,
+                  color: "#fff",
+                  fontSize: 10,
+                  fontWeight: 700,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
+                  cursor: "pointer",
                 }}
               >
-                <div
-                  style={{
-                    width: 18,
-                    height: 18,
-                    borderRadius: 9,
-                    background: "#f59e0b",
-                    border: "2px solid #7c2d12",
-                    color: "#fff",
-                    fontSize: 10,
-                    fontWeight: 700,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  {i + 1}
-                </div>
+                {i + 1}
               </div>
             </GLMarker>
-          ))}
-        </MapGL>
-      </div>
-    );
-  }
+          );
+        })}
 
-  return (
-    <APIProvider apiKey={googleMapsApiKey}>
-      <div className="relative h-full w-full">
-        <Map
-          defaultCenter={{
-            lat: defaultMapView.latitude,
-            lng: defaultMapView.longitude,
-          }}
-          defaultZoom={defaultMapView.zoom}
-          mapTypeId={mapTypeId}
-          renderingType={RenderingType.VECTOR}
-          defaultTilt={vizPrefs?.viewMode === "3d" ? 45 : 0}
-          tiltInteractionEnabled={is3D}
-          headingInteractionEnabled={is3D}
-          disableDefaultUI
-          disableDoubleClickZoom={
-            templateMode !== null || drawingVertices.length > 0
-          }
-          gestureHandling="greedy"
-          clickableIcons={false}
-          reuseMaps
-          style={{ width: "100%", height: "100%" }}
-        >
-          <RnbBuildingsLayer
-            enabled={showRnbLayer}
-            buildings={rnbBuildings}
-            selectedBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
-            onBuildingsChange={setRnbBuildings}
-            onSelectBuilding={handleSelectRnbBuilding}
-          />
-          <MapInteraction
-            targetTilt={is3D ? (mapTypeId === HYBRID_TYPE ? 67.5 : 45) : 0}
-            templateMode={templateMode}
-            dragState={dragState}
-            setDragState={setDragState}
-            rawPath={rawPath}
-            setRawPath={setRawPath}
-            setOrbitParams={setOrbitParams}
-            setGridParams={setGridParams}
-            setFacadeParams={setFacadeParams}
-            setPencilParams={setPencilParams}
-            setTemplateConfirmed={setTemplateConfirmed}
-            rnbSelectionEnabled={showRnbLayer}
-            rnbBuildings={rnbBuildings}
-            onSelectRnbBuilding={handleSelectRnbBuilding}
-            onClearRnbSelection={handleClearSelectedBuilding}
-          />
-          <MainMapViewportSync onChange={setMainMapViewport} />
-          <FitBoundsOnLoad />
-          <AirspaceLayer />
-
-          {waypoints.slice(0, -1).map((waypoint, index) => {
-            const next = waypoints[index + 1];
-            return (
-              <PolylineOverlay
-                key={`flight-${waypoint.index}-${next.index}`}
-                path={[
-                  toLatLng(waypoint.latitude, waypoint.longitude),
-                  toLatLng(next.latitude, next.longitude),
-                ]}
-                strokeColor={
-                  warningSegments.has(waypoint.index) ? "#ef4444" : "#3b82f6"
-                }
-                strokeOpacity={0}
-                strokeWeight={3}
-                icons={dashedIcon(
-                  warningSegments.has(waypoint.index) ? "#ef4444" : "#3b82f6",
-                )}
-              />
-            );
-          })}
-
-          {waypoints.map((waypoint) => {
-            const targetPoi =
-              waypoint.headingMode === "towardPOI" && waypoint.poiId
-                ? pois.find((poi) => poi.id === waypoint.poiId)
-                : null;
-            if (!targetPoi) return null;
-            return (
-              <PolylineOverlay
-                key={`poi-line-${waypoint.index}-${targetPoi.id}`}
-                path={[
-                  toLatLng(waypoint.latitude, waypoint.longitude),
-                  toLatLng(targetPoi.latitude, targetPoi.longitude),
-                ]}
-                strokeColor="#4ade80"
-                strokeOpacity={0}
-                strokeWeight={2}
-                icons={dashedIcon("#4ade80")}
-              />
-            );
-          })}
-
-          {waypointHeadings
-            .filter(({ waypoint }) => hasExplicitHeading(waypoint))
-            .map(({ waypoint, heading }) => (
-              <PolylineOverlay
-                key={`heading-${waypoint.index}`}
-                path={headingPath(waypoint, heading)}
-                strokeColor="#ef4444"
-                strokeOpacity={
-                  selectedWaypointIndices.has(waypoint.index) ? 0.85 : 0.45
-                }
-                strokeWeight={
-                  selectedWaypointIndices.has(waypoint.index) ? 3 : 2
-                }
-                zIndex={selectedWaypointIndices.has(waypoint.index) ? 800 : 120}
-              />
-            ))}
-
-          {singleSelectedWaypoint && frustumCorners && (
-            <>
-              <PolygonOverlay
-                path={frustumCorners.map(([lat, lng]) => ({ lat, lng }))}
-                strokeColor="#94a3b8"
-                strokeOpacity={0.65}
-                strokeWeight={2}
-                fillColor="#94a3b8"
-                fillOpacity={0.12}
-                zIndex={140}
-              />
-              {frustumCorners.map(([lat, lng], index) => (
-                <PolylineOverlay
-                  key={`frustum-edge-${index}`}
-                  path={[
-                    toLatLng(
-                      singleSelectedWaypoint.latitude,
-                      singleSelectedWaypoint.longitude,
-                    ),
-                    { lat, lng },
-                  ]}
-                  strokeColor="#94a3b8"
-                  strokeOpacity={0.55}
-                  strokeWeight={2}
-                  zIndex={130}
-                />
-              ))}
-            </>
-          )}
-
-          {detectedBuilding && (
-            <>
-              <PolygonOverlay
-                path={detectedBuilding.footprint.map((point) => ({
-                  lat: point.lat,
-                  lng: point.lng,
-                }))}
-                strokeColor="#14b8a6"
-                strokeOpacity={0.8}
-                strokeWeight={2}
-                fillColor="#14b8a6"
-                fillOpacity={0.08}
-                zIndex={125}
-              />
-              {facadeSegmentOptions.map((segment) => {
-                const isSelected = segment.id === selectedFacadeSegmentId;
-                return (
-                  <PolylineOverlay
-                    key={segment.id}
-                    path={[segment.start, segment.end]}
-                    strokeColor={isSelected ? "#14b8a6" : "#f59e0b"}
-                    strokeOpacity={isSelected ? 0.95 : 0.7}
-                    strokeWeight={isSelected ? 5 : 3}
-                    clickable
-                    zIndex={isSelected ? 126 : 124}
-                    onClick={() => {
-                      const seed = facadeAssistSeedParams ?? facadeParams;
-                      if (!seed) return;
-                      const scenario = applyFacadeScenario(
-                        detectedBuilding,
-                        seed,
-                        segment.id,
-                        selectedFacadeVariantId,
-                      );
-                      if (!scenario) return;
-                      setFacadeAssistMessage(
-                        `${scenario.selectedSegment.label} selected, ${scenario.selectedVariant.label.toLowerCase()} variant at ${(scenario.selectedVariant.score * 100).toFixed(0)}%.`,
-                      );
-                    }}
-                  />
-                );
-              })}
-            </>
-          )}
-
-          {obstacles.map((obstacle) => {
-            const isSelected = selectedObstacleId === obstacle.id;
-            const path = obstaclePath(obstacle.vertices);
-            const midpoints = isSelected
-              ? obstacle.vertices.map((vertex, index) => {
-                  const next =
-                    obstacle.vertices[(index + 1) % obstacle.vertices.length];
-                  return {
-                    lat: (vertex[0] + next[0]) / 2,
-                    lng: (vertex[1] + next[1]) / 2,
-                    index,
-                  };
-                })
-              : [];
-
-            return (
-              <div key={obstacle.id}>
-                <PolygonOverlay
-                  path={path}
-                  strokeColor="#ef4444"
-                  strokeWeight={isSelected ? 3 : 2}
-                  fillColor="#ef4444"
-                  fillOpacity={isSelected ? 0.18 : 0.12}
-                  clickable
-                  onClick={() => selectObstacle(obstacle.id)}
-                />
-                {isSelected &&
-                  obstacle.vertices.map(([lat, lng], vertexIndex) => (
-                    <MarkerOverlay
-                      key={`${obstacle.id}-vertex-${vertexIndex}`}
-                      position={{ lat, lng }}
-                      fillColor="#ffffff"
-                      strokeColor="#ef4444"
-                      scale={6}
-                      draggable
-                      onDragEnd={(position) => {
-                        moveObstacleVertex(
-                          obstacle.id,
-                          vertexIndex,
-                          position.lat,
-                          position.lng,
-                        );
-                      }}
-                      onRightClick={() => {
-                        if (obstacle.vertices.length > 3) {
-                          removeObstacleVertex(obstacle.id, vertexIndex);
-                        }
-                      }}
-                    />
-                  ))}
-                {isSelected &&
-                  midpoints.map((midpoint) => (
-                    <MarkerOverlay
-                      key={`${obstacle.id}-mid-${midpoint.index}`}
-                      position={{ lat: midpoint.lat, lng: midpoint.lng }}
-                      fillColor="#fecaca"
-                      strokeColor="#ef4444"
-                      scale={4}
-                      onClick={() => {
-                        addObstacleVertex(
-                          obstacle.id,
-                          midpoint.index,
-                          midpoint.lat,
-                          midpoint.lng,
-                        );
-                      }}
-                    />
-                  ))}
-              </div>
-            );
-          })}
-
-          {drawingVertices.length >= 2 && (
-            <PolylineOverlay
-              path={drawingVertices.map(([lat, lng]) => ({ lat, lng }))}
-              strokeColor="#ef4444"
-              strokeOpacity={0}
-              strokeWeight={2}
-              icons={dashedIcon("#ef4444")}
-            />
-          )}
-
-          {drawingVertices.length >= 3 && (
-            <PolylineOverlay
-              path={[
-                {
-                  lat: drawingVertices[drawingVertices.length - 1][0],
-                  lng: drawingVertices[drawingVertices.length - 1][1],
-                },
-                { lat: drawingVertices[0][0], lng: drawingVertices[0][1] },
-              ]}
-              strokeColor="#ef4444"
-              strokeOpacity={0}
-              strokeWeight={2}
-              icons={dashedIcon("#ef4444")}
-            />
-          )}
-
-          {drawingVertices.map(([lat, lng], index) => (
-            <MarkerOverlay
-              key={`drawing-${index}`}
-              position={{ lat, lng }}
-              fillColor={index === 0 ? "#fca5a5" : "#ffffff"}
-              strokeColor="#ef4444"
-              scale={index === 0 ? 7 : 5}
-            />
-          ))}
-
-          {waypoints.map((waypoint) => (
-            <MarkerOverlay
-              key={`waypoint-${waypoint.index}`}
-              position={toLatLng(waypoint.latitude, waypoint.longitude)}
-              title={`${waypoint.name}\nAlt: ${waypoint.height}m | Speed: ${waypoint.speed}m/s\nGimbal: ${waypoint.gimbalPitchAngle}°\n${waypoint.latitude.toFixed(6)}, ${waypoint.longitude.toFixed(6)}`}
-              label={`${waypoint.index + 1}`}
-              fillColor={
-                selectedWaypointIndices.has(waypoint.index)
-                  ? "#3b82f6"
-                  : "#1e293b"
-              }
-              strokeColor={
-                selectedWaypointIndices.has(waypoint.index)
-                  ? "#93c5fd"
-                  : "#64748b"
-              }
-              scale={10}
-              draggable
-              zIndex={selectedWaypointIndices.has(waypoint.index) ? 1000 : 100}
-              onClick={(event) =>
-                selectWaypoint(waypoint.index, selectionModeFromEvent(event))
-              }
-              onDragEnd={(position) =>
-                moveWaypoint(waypoint.index, position.lat, position.lng)
-              }
-            />
-          ))}
-
-          {pois.map((poi) => (
-            <MarkerOverlay
+        {/* POI markers (draggable, ctrl+click aims selected waypoints) */}
+        {pois.map((poi) => {
+          const selected = selectedPoiId === poi.id;
+          return (
+            <GLMarker
               key={`poi-${poi.id}`}
-              position={toLatLng(poi.latitude, poi.longitude)}
-              title={`${poi.name}\nHeight: ${poi.height}m${ctrlHeld && selectedWaypointIndices.size > 0 ? "\nCtrl+click to aim selected waypoints here" : ""}`}
-              fillColor={selectedPoiId === poi.id ? "#ef4444" : "#dc2626"}
-              strokeColor={selectedPoiId === poi.id ? "#fca5a5" : "#991b1b"}
-              scale={9}
-              iconPath="arrow"
+              longitude={poi.longitude}
+              latitude={poi.latitude}
+              anchor="center"
               draggable
-              zIndex={900}
-              onClick={() => {
+              onDragEnd={(e: any) =>
+                movePoi(poi.id, e.lngLat.lat, e.lngLat.lng)
+              }
+              onClick={(e: any) => {
+                e.originalEvent.stopPropagation();
                 if (ctrlHeld && selectedWaypointIndices.size > 0) {
                   for (const index of selectedWaypointIndices) {
                     updateWaypoint(index, {
@@ -4440,538 +4022,416 @@ export function MapView() {
                 }
                 selectPoi(poi.id);
               }}
-              onDragEnd={(position) =>
-                movePoi(poi.id, position.lat, position.lng)
-              }
-            />
-          ))}
-
-          {dragState && !templateConfirmed && templateMode === "orbit" && (
-            <PolylineOverlay
-              path={circlePath(
-                dragState.start,
-                haversine(
-                  dragState.start[0],
-                  dragState.start[1],
-                  dragState.end[0],
-                  dragState.end[1],
-                ),
-              )}
-              strokeColor="#a78bfa"
-              strokeOpacity={0.65}
-              strokeWeight={2}
-            />
-          )}
-
-          {dragState && !templateConfirmed && templateMode === "grid" && (
-            <PolygonOverlay
-              path={rectanglePath(dragState.start, dragState.end)}
-              strokeColor="#a78bfa"
-              fillColor="#a78bfa"
-              fillOpacity={0.08}
-            />
-          )}
-
-          {dragState && !templateConfirmed && templateMode === "facade" && (
-            <PolylineOverlay
-              path={[
-                { lat: dragState.start[0], lng: dragState.start[1] },
-                { lat: dragState.end[0], lng: dragState.end[1] },
-              ]}
-              strokeColor="#a78bfa"
-              strokeOpacity={0.8}
-              strokeWeight={3}
-            />
-          )}
-
-          {rawPath.length >= 2 && templateMode === "pencil" && (
-            <PolylineOverlay
-              path={rawPath.map(([lat, lng]) => ({ lat, lng }))}
-              strokeColor="#a78bfa"
-              strokeOpacity={0.8}
-              strokeWeight={3}
-            />
-          )}
-
-          {mapPreview?.waypoints.slice(0, -1).map((waypoint, index) => {
-            const next = mapPreview.waypoints[index + 1];
-            return (
-              <PolylineOverlay
-                key={`template-line-${index}`}
-                path={[
-                  toLatLng(waypoint.latitude, waypoint.longitude),
-                  toLatLng(next.latitude, next.longitude),
-                ]}
-                strokeColor="#a78bfa"
-                strokeOpacity={0.7}
-                strokeWeight={2}
-              />
-            );
-          })}
-
-          {mapPreview?.waypoints.map((waypoint, index) => (
-            <MarkerOverlay
-              key={`template-waypoint-${index}`}
-              position={toLatLng(waypoint.latitude, waypoint.longitude)}
-              label={`${index + 1}`}
-              fillColor="#7c3aed"
-              strokeColor="#c4b5fd"
-              scale={8}
-            />
-          ))}
-
-          {mapPreview?.pois.map((poi, index) => (
-            <MarkerOverlay
-              key={`template-poi-${index}`}
-              position={toLatLng(poi.latitude, poi.longitude)}
-              fillColor="#ef4444"
-              strokeColor="#fecaca"
-              scale={7}
-              iconPath="arrow"
-            />
-          ))}
-
-          {showRnbLayer && selectedRnbCentroidPosition && (
-            <MarkerOverlay
-              position={selectedRnbCentroidPosition}
-              label="C"
-              title="Centroide batiment"
-              fillColor="#111827"
-              strokeColor="#ffffff"
-              scale={7}
-              zIndex={220}
-            />
-          )}
-        </Map>
-
-        <MapSearch value={searchValue} onValueChange={setSearchValue} />
-
-        {showRnbLayer && selectedRnbBuilding && showSelectedRnbInfo && (
-          <DraggablePanel
-            className="left-4 top-4 z-10 w-[320px]"
-            defaultPosition={{ x: 0, y: 0 }}
-            title="Bâtiment RNB"
-            onClose={handleClearSelectedBuilding}
-          >
-            <div className="p-3">
-              {buildRnbInfoWindowContent({
-                building: selectedRnbBuilding.building,
-                bdTopoBuilding: selectedBdTopoBuilding,
-                threeDMarkers: buildings3DMarkers,
-                approximateBuildingShell: reconstructionShell,
-                loading: selectedRnbBuildingLoading,
-              })}
-            </div>
-          </DraggablePanel>
-        )}
-
-        {selectedRnbBuilding && showSelectedBuildingScanPanel && (
-          <DraggablePanel
-            className="left-4 top-4 z-10 w-[360px]"
-            defaultPosition={{ x: 340, y: 0 }}
-            title="Facade scan du bâtiment"
-            onClose={clearTransientMapUi}
-          >
-            <div className="p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-wider text-cyan-400">
-                    Facade scan du bâtiment
-                  </div>
-                  <div className="mt-1 text-sm font-medium text-foreground">
-                    {selectedRnbBuilding.building.rnbId}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    {selectedBuildingFacadeSegments.length} façades détectées
-                    {selectedBuildingHeightM != null
-                      ? ` • hauteur ~ ${Math.round(selectedBuildingHeightM)} m`
-                      : ""}
-                  </div>
-                </div>
+            >
+              <div
+                title={`${poi.name}\nHeight: ${poi.height}m${ctrlHeld && selectedWaypointIndices.size > 0 ? "\nCtrl+click to aim selected waypoints here" : ""}`}
+                style={{
+                  width: 18,
+                  height: 18,
+                  borderRadius: 9,
+                  background: selected ? "#ef4444" : "#0d9488",
+                  border: `2px solid ${selected ? "#fca5a5" : "#fff"}`,
+                  color: "#fff",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                }}
+              >
+                P
               </div>
+            </GLMarker>
+          );
+        })}
 
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  className={`rounded-md border px-3 py-2 text-left text-xs ${selectedBuildingScanMode === "reconstruction-3d" ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
-                  onClick={() =>
-                    setSelectedBuildingScanMode("reconstruction-3d")
+        {/* Obstacle editing: draggable vertices + clickable midpoints */}
+        {obstacles.map((obstacle) => {
+          const isSelected = selectedObstacleId === obstacle.id;
+          if (!isSelected) return null;
+          const midpoints =
+            obstacle.vertices.length >= 2
+              ? obstacle.vertices.map((vertex, index) => {
+                  const next =
+                    obstacle.vertices[(index + 1) % obstacle.vertices.length];
+                  return {
+                    lat: (vertex[0] + next[0]) / 2,
+                    lng: (vertex[1] + next[1]) / 2,
+                    index,
+                  };
+                })
+              : [];
+          return (
+            <Fragment key={`obstacle-edit-${obstacle.id}`}>
+              {obstacle.vertices.map(([lat, lng], vertexIndex) => (
+                <GLMarker
+                  key={`${obstacle.id}-vertex-${vertexIndex}`}
+                  longitude={lng}
+                  latitude={lat}
+                  anchor="center"
+                  draggable
+                  onDragEnd={(e: any) =>
+                    moveObstacleVertex(
+                      obstacle.id,
+                      vertexIndex,
+                      e.lngLat.lat,
+                      e.lngLat.lng,
+                    )
                   }
                 >
-                  <div className="font-medium">3D reconstruction</div>
-                  <div className="mt-1 text-[10px]">
-                    Plan de vol photogrammétrique du bâtiment sélectionné
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-md border px-3 py-2 text-left text-xs ${selectedBuildingScanMode === "facade-scan" ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
-                  onClick={() => setSelectedBuildingScanMode("facade-scan")}
+                  <div
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (obstacle.vertices.length > 3) {
+                        removeObstacleVertex(obstacle.id, vertexIndex);
+                      }
+                    }}
+                    title="Drag to move • right-click to remove"
+                    style={{
+                      width: 12,
+                      height: 12,
+                      borderRadius: 6,
+                      background: "#ffffff",
+                      border: "2px solid #ef4444",
+                      cursor: "move",
+                    }}
+                  />
+                </GLMarker>
+              ))}
+              {midpoints.map((midpoint) => (
+                <GLMarker
+                  key={`${obstacle.id}-mid-${midpoint.index}`}
+                  longitude={midpoint.lng}
+                  latitude={midpoint.lat}
+                  anchor="center"
+                  onClick={(e: any) => {
+                    e.originalEvent.stopPropagation();
+                    addObstacleVertex(
+                      obstacle.id,
+                      midpoint.index,
+                      midpoint.lat,
+                      midpoint.lng,
+                    );
+                  }}
                 >
-                  <div className="font-medium">Scan des façades</div>
-                  <div className="mt-1 text-[10px]">
-                    Waypoints façade par façade pour le bâtiment sélectionné
-                  </div>
-                </button>
-              </div>
+                  <div
+                    title="Click to add vertex"
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      background: "#fecaca",
+                      border: "2px solid #ef4444",
+                      cursor: "pointer",
+                    }}
+                  />
+                </GLMarker>
+              ))}
+            </Fragment>
+          );
+        })}
+        {drawingVertices.map(([lat, lng], index) => (
+          <GLMarker
+            key={`drawing-${index}`}
+            longitude={lng}
+            latitude={lat}
+            anchor="center"
+          >
+            <div
+              style={{
+                width: index === 0 ? 14 : 10,
+                height: index === 0 ? 14 : 10,
+                borderRadius: index === 0 ? 7 : 5,
+                background: index === 0 ? "#fca5a5" : "#ffffff",
+                border: "2px solid #ef4444",
+              }}
+            />
+          </GLMarker>
+        ))}
 
-              <div className="mt-3 space-y-2">
-                {buildingScanVariants.map((variant) => (
-                  <button
-                    key={variant.id}
-                    type="button"
-                    onClick={() => setSelectedBuildingScanVariantId(variant.id)}
-                    className={`w-full rounded-md border px-3 py-2 text-left ${selectedBuildingScanVariant?.id === variant.id ? "border-primary bg-primary/10" : "border-border bg-background/60"}`}
-                  >
-                    <div className="text-xs font-medium text-foreground">
-                      {variant.label}
-                    </div>
-                    <div className="text-[10px] text-muted-foreground">
-                      {variant.detail}
-                    </div>
-                    <div className="mt-1 text-[10px] text-muted-foreground">
-                      {variant.description}
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-3 rounded-md border border-cyan-500/30 bg-cyan-500/5 px-3 py-2 text-[11px] text-muted-foreground">
-                {selectedBuildingScanPreview
-                  ? `${selectedBuildingScanPreview.label} affiché sur la carte • ${selectedBuildingScanPreview.mission.waypoints.length} waypoints`
-                  : "Aucun aperçu exploitable pour cette configuration."}
-              </div>
-
-              {selectedBuildingScanMode === "facade-scan" &&
-                selectedBuildingFacadeSegments.length > 0 && (
-                  <div className="mt-3 rounded-md border border-border/70 bg-background/60 p-2">
-                    <div className="text-[11px] font-medium text-foreground">
-                      Façades prises en compte
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {selectedBuildingFacadeSegments.map((segment) => (
-                        <span
-                          key={segment.id}
-                          className="rounded-full border border-border px-2 py-1 text-[10px] text-muted-foreground"
-                        >
-                          {segment.label} • {segment.lengthM.toFixed(0)}m
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-              <div className="mt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  className="rounded-md border border-border px-3 py-2 text-xs"
-                  onClick={clearTransientMapUi}
-                >
-                  Annuler
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
-                  onClick={handleSelectedBuildingScanApply}
-                >
-                  Apply
-                </button>
-              </div>
-            </div>
-          </DraggablePanel>
-        )}
-
-        {templateMode && !templateConfirmed && (
-          <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-md border border-border bg-background/95 px-4 py-2 text-xs text-muted-foreground shadow-lg">
-            {templateMode === "pencil"
-              ? "Click to add path points, then double-click or use Finish."
-              : "Click once to set the start point, then click again to define the template."}
-          </div>
-        )}
-
-        {templateMode === "pencil" &&
-          rawPath.length >= 2 &&
-          !templateConfirmed && (
-            <div className="absolute right-4 top-4 z-10 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
-              <button
-                className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
-                onClick={() => {
-                  if (pathLength(rawPath) < MIN_PENCIL_PATH_LENGTH_M) return;
-                  setPencilParams({ ...DEFAULT_PENCIL_PARAMS, path: rawPath });
-                  setTemplateConfirmed(true);
-                }}
-              >
-                Finish path
-              </button>
-              <button
-                className="rounded-md border border-border px-3 py-2 text-xs"
-                onClick={() => {
-                  clearTransientMapUi();
-                  setTemplateMode(null);
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          )}
-
-        {drawingVertices.length >= 3 && (
-          <div className="absolute right-4 top-4 z-10 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
-            <button
-              className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
-              onClick={() => addObstacle(drawingVertices)}
-            >
-              Finish obstacle
-            </button>
-            <button
-              className="rounded-md border border-border px-3 py-2 text-xs"
-              onClick={() => {
-                setDrawingVertices([]);
-                setIsDrawingObstacle(false);
+        {/* Template preview waypoints + POIs */}
+        {mapPreview?.waypoints.map((waypoint, index) => (
+          <GLMarker
+            key={`template-waypoint-${index}`}
+            longitude={waypoint.longitude}
+            latitude={waypoint.latitude}
+            anchor="center"
+          >
+            <div
+              style={{
+                width: 16,
+                height: 16,
+                borderRadius: 8,
+                background: "#7c3aed",
+                border: "2px solid #c4b5fd",
+                color: "#fff",
+                fontSize: 9,
+                fontWeight: 700,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
               }}
             >
-              Cancel
-            </button>
-          </div>
+              {index + 1}
+            </div>
+          </GLMarker>
+        ))}
+        {mapPreview?.pois.map((poi, index) => (
+          <GLMarker
+            key={`template-poi-${index}`}
+            longitude={poi.longitude}
+            latitude={poi.latitude}
+            anchor="center"
+          >
+            <div
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 7,
+                background: "#ef4444",
+                border: "2px solid #fecaca",
+              }}
+            />
+          </GLMarker>
+        ))}
+
+        {/* Selected RNB building centroid */}
+        {showRnbLayer && selectedRnbCentroidPosition && (
+          <GLMarker
+            longitude={selectedRnbCentroidPosition.lng}
+            latitude={selectedRnbCentroidPosition.lat}
+            anchor="center"
+          >
+            <div
+              title="Centroide batiment"
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 7,
+                background: "#111827",
+                border: "2px solid #ffffff",
+                color: "#fff",
+                fontSize: 9,
+                fontWeight: 700,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              C
+            </div>
+          </GLMarker>
         )}
+      </MapGL>
 
-        {activeTemplateType && templatePreview && (
-          <TemplateConfigPanel
-            type={activeTemplateType}
-            orbitParams={orbitParams}
-            gridParams={gridParams}
-            facadeParams={facadeParams}
-            pencilParams={pencilParams}
-            onOrbitChange={setOrbitParams}
-            onGridChange={setGridParams}
-            onFacadeChange={setFacadeParams}
-            onPencilChange={setPencilParams}
-            onApply={() => {
-              appendWaypoints(templatePreview.waypoints, templatePreview.pois);
-              clearTransientMapUi();
-              setTemplateMode(null);
-            }}
-            onCancel={() => {
-              clearTransientMapUi();
-              setTemplateMode(null);
-            }}
-            onFacadeAssist={
-              activeTemplateType === "facade" ? handleFacadeAssist : undefined
-            }
-            onFacadeObjectiveChange={
-              activeTemplateType === "facade"
-                ? (objective) => {
-                    setFacadeObjective(objective);
-                    const seed = facadeAssistSeedParams ?? facadeParams;
-                    if (!seed || !detectedBuilding) return;
-                    const scenario = buildFacadeScenario(
-                      seed,
-                      detectedBuilding,
-                      selectedFacadeSegmentId,
-                      selectedFacadeVariantId,
-                    );
-                    if (!scenario) return;
-                    void (async () => {
-                      const recommendation = await refreshFacadeRecommendation(
-                        detectedBuilding,
-                        scenario,
-                      );
-                      setFacadeAssistMessage(
-                        recommendation
-                          ? `Goal switched to ${recommendation.objectiveLabel.toLowerCase()}. Copilot recommends ${recommendation.recommendedVariantLabel.toLowerCase()}.`
-                          : "Mission goal updated.",
-                      );
-                    })();
-                  }
-                : undefined
-            }
-            onReconstructionPresetSelect={
-              activeTemplateType === "facade" &&
-              reconstructionPresets.length > 0
-                ? handleReconstructionPresetSelect
-                : undefined
-            }
-            onFacadeSegmentSelect={
-              activeTemplateType === "facade"
-                ? (segmentId) => {
-                    const seed = facadeAssistSeedParams ?? facadeParams;
-                    if (!seed || !detectedBuilding) return;
-                    void (async () => {
-                      const scenario = applyFacadeScenario(
-                        detectedBuilding,
-                        seed,
-                        segmentId,
-                        selectedFacadeVariantId,
-                      );
-                      if (!scenario) return;
-                      const recommendation = await refreshFacadeRecommendation(
-                        detectedBuilding,
-                        scenario,
-                      );
-                      setFacadeAssistMessage(
-                        recommendation
-                          ? `${scenario.selectedSegment.label} selected. Copilot still prefers ${recommendation.recommendedVariantLabel.toLowerCase()}.`
-                          : `${scenario.selectedSegment.label} selected, ${scenario.selectedVariant.label.toLowerCase()} variant at ${(scenario.selectedVariant.score * 100).toFixed(0)}%.`,
-                      );
-                    })();
-                  }
-                : undefined
-            }
-            onFacadeVariantSelect={
-              activeTemplateType === "facade"
-                ? (variantId) => {
-                    const seed = facadeAssistSeedParams ?? facadeParams;
-                    if (!seed || !detectedBuilding) return;
-                    void (async () => {
-                      const scenario = applyFacadeScenario(
-                        detectedBuilding,
-                        seed,
-                        selectedFacadeSegmentId,
-                        variantId,
-                      );
-                      if (!scenario) return;
-                      const recommendation = await refreshFacadeRecommendation(
-                        detectedBuilding,
-                        scenario,
-                      );
-                      setFacadeAssistMessage(
-                        recommendation
-                          ? recommendation.currentVariantMatchesRecommendation
-                            ? `${scenario.selectedVariant.label} matches the copilot recommendation.`
-                            : `${scenario.selectedVariant.label} selected. Copilot recommends ${recommendation.recommendedVariantLabel.toLowerCase()} instead.`
-                          : `${scenario.selectedVariant.label} variant selected with ${scenario.selectedVariant.detail}.`,
-                      );
-                    })();
-                  }
-                : undefined
-            }
-            facadeAssistBusy={facadeAssistBusy}
-            facadeObjective={
-              activeTemplateType === "facade" ? facadeObjective : undefined
-            }
-            facadeAssistMessage={
-              activeTemplateType === "facade" ? facadeAssistMessage : null
-            }
-            facadeRecommendationBusy={
-              activeTemplateType === "facade" ? facadeRecommendationBusy : false
-            }
-            facadeRecommendation={
-              activeTemplateType === "facade" ? facadeRecommendation : null
-            }
-            reconstructionInfo={
-              activeTemplateType === "facade" && reconstructionShell
-                ? {
-                    estimatedHeightLabel: `${Math.round(reconstructionShell.estimatedHeightM)}m`,
-                    confidenceLabel: `${reconstructionShell.confidencePercent}%`,
-                    roofLabel: reconstructionShell.roofStyleLabel,
-                    sourceSummary: reconstructionShell.sourceSummary,
-                    note: reconstructionShell.note,
-                  }
-                : null
-            }
-            reconstructionPresets={
-              activeTemplateType === "facade"
-                ? reconstructionPresets
-                : undefined
-            }
-            facadeSegments={
-              activeTemplateType === "facade"
-                ? facadeSegmentOptions.map((segment) => ({
-                    id: segment.id,
-                    label: segment.label,
-                    detail: `${segment.lengthM.toFixed(0)}m • ${segment.distanceToHintM.toFixed(0)}m off`,
-                    selected: segment.id === selectedFacadeSegmentId,
-                  }))
-                : undefined
-            }
-            facadeVariants={
-              activeTemplateType === "facade"
-                ? facadeVariantOptions.map((variant) => ({
-                    id: variant.id,
-                    label: variant.label,
-                    detail: variant.detail,
-                    selected: variant.id === selectedFacadeVariantId,
-                  }))
-                : undefined
-            }
-            waypointCount={templatePreview.waypoints.length}
-            pois={pois}
-          />
-        )}
+      <MapSearch
+        value={searchValue}
+        onValueChange={setSearchValue}
+        onPick={handleSearchPick}
+      />
 
-        <Buildings3DPanel
-          open={is3D}
-          view={buildings3DView}
-          markers={buildings3DMarkers}
-          showRnbLayer={showRnbLayer}
-          rnbBuildings={showRnbLayer ? rnbBuildings : []}
-          selectedRnbBuildingId={selectedRnbBuilding?.building.rnbId ?? null}
-          detectedBuilding={detectedBuilding}
-          reconstructionShell={reconstructionShell}
-          contextShells={contextShells}
-          scanRoute={scanRoute3D}
-          streetViewContext={streetViewContext}
-          selectedSegment={selectedFacadeSegment}
-          facadeRecommendation={facadeRecommendation}
-          onClose={() => {
-            setIs3D(false);
-          }}
-        />
-
-        <div className="absolute bottom-4 left-4 z-10 flex gap-1">
-          <button
-            className={`px-2 py-1 text-xs rounded ${mapTypeId === ROADMAP_TYPE ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => setMapTypeId(ROADMAP_TYPE)}
-          >
-            Street
-          </button>
-          <button
-            className={`px-2 py-1 text-xs rounded ${mapTypeId === HYBRID_TYPE ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => setMapTypeId(HYBRID_TYPE)}
-          >
-            Satellite
-          </button>
-          <div className="w-px bg-border mx-1" />
-          <button
-            className={`px-2 py-1 text-xs rounded ${!is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => {
-              setIs3D(false);
-            }}
-          >
-            2D
-          </button>
-          <button
-            className={`px-2 py-1 text-xs rounded ${is3D ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => setIs3D(true)}
-          >
-            3D
-          </button>
-          <div className="w-px bg-border mx-1" />
-          <button
-            className={`px-2 py-1 text-xs rounded ${showRnbLayer ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
-            onClick={() => setShowRnbLayer((value) => !value)}
-          >
-            Bâtiments 2D
-          </button>
+      {templateMode && !templateConfirmed && (
+        <div className="absolute left-1/2 top-4 z-10 -translate-x-1/2 rounded-md border border-border bg-background/95 px-4 py-2 text-xs text-muted-foreground shadow-lg">
+          {templateMode === "pencil"
+            ? "Click to add path points, then double-click or use Finish."
+            : "Click once to set the start point, then click again to define the template."}
         </div>
+      )}
 
-        {showRnbLayer && rnbBuildings.length === 0 && (
-          <div className="absolute bottom-16 left-4 z-10 rounded-md border border-border bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-lg">
-            Aucune donnée RNB visible ici. Le référentiel couvre la France.
+      {showRnbLayer && selectedRnbBuilding && showSelectedRnbInfo && (
+        <DraggablePanel
+          className="left-4 top-4 z-10 w-[320px]"
+          defaultPosition={{ x: 0, y: 0 }}
+          title="Bâtiment RNB"
+          onClose={handleClearSelectedBuilding}
+        >
+          <div className="p-3">
+            {buildRnbInfoWindowContent({
+              building: selectedRnbBuilding.building,
+              bdTopoBuilding: selectedBdTopoBuilding,
+              threeDMarkers: buildings3DMarkers,
+              approximateBuildingShell: reconstructionShell,
+              loading: selectedRnbBuildingLoading,
+            })}
           </div>
-        )}
+        </DraggablePanel>
+      )}
 
-        <MapToolbar
-          selectedBuildingScanOption={{
-            enabled: selectedRnbBuilding != null,
-            description: selectedRnbBuilding
-              ? "Ouvre le scan facade du bâtiment sélectionné"
-              : "Sélectionnez un bâtiment sur la carte",
-            onClick: openSelectedBuildingScanPanel,
-          }}
-          onClearAll={clearTransientMapUi}
-        />
-      </div>
-    </APIProvider>
+      {selectedRnbBuilding && showSelectedBuildingScanPanel && (
+        <DraggablePanel
+          className="left-4 top-4 z-10 w-[360px]"
+          defaultPosition={{ x: 340, y: 0 }}
+          title="Facade scan du bâtiment"
+          onClose={clearTransientMapUi}
+        >
+          <div className="p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-cyan-400">
+                  Facade scan du bâtiment
+                </div>
+                <div className="mt-1 text-sm font-medium text-foreground">
+                  {selectedRnbBuilding.building.rnbId}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  {selectedBuildingFacadeSegments.length} façades détectées
+                  {selectedBuildingHeightM != null
+                    ? ` • hauteur ~ ${Math.round(selectedBuildingHeightM)} m`
+                    : ""}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                className={`rounded-md border px-3 py-2 text-left text-xs ${selectedBuildingScanMode === "reconstruction-3d" ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
+                onClick={() => setSelectedBuildingScanMode("reconstruction-3d")}
+              >
+                <div className="font-medium">3D reconstruction</div>
+                <div className="mt-1 text-[10px]">
+                  Plan de vol photogrammétrique du bâtiment sélectionné
+                </div>
+              </button>
+              <button
+                type="button"
+                className={`rounded-md border px-3 py-2 text-left text-xs ${selectedBuildingScanMode === "facade-scan" ? "border-primary bg-primary/15 text-foreground" : "border-border bg-background/60 text-muted-foreground"}`}
+                onClick={() => setSelectedBuildingScanMode("facade-scan")}
+              >
+                <div className="font-medium">Scan des façades</div>
+                <div className="mt-1 text-[10px]">
+                  Waypoints façade par façade pour le bâtiment sélectionné
+                </div>
+              </button>
+            </div>
+
+            <div className="mt-3 space-y-2">
+              {buildingScanVariants.map((variant) => (
+                <button
+                  key={variant.id}
+                  type="button"
+                  onClick={() => setSelectedBuildingScanVariantId(variant.id)}
+                  className={`w-full rounded-md border px-3 py-2 text-left ${selectedBuildingScanVariant?.id === variant.id ? "border-primary bg-primary/10" : "border-border bg-background/60"}`}
+                >
+                  <div className="text-xs font-medium text-foreground">
+                    {variant.label}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    {variant.detail}
+                  </div>
+                  <div className="mt-1 text-[10px] text-muted-foreground">
+                    {variant.description}
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-3 rounded-md border border-cyan-500/30 bg-cyan-500/5 px-3 py-2 text-[11px] text-muted-foreground">
+              {selectedBuildingScanPreview
+                ? `${selectedBuildingScanPreview.label} affiché sur la carte • ${selectedBuildingScanPreview.mission.waypoints.length} waypoints`
+                : "Aucun aperçu exploitable pour cette configuration."}
+            </div>
+
+            {selectedBuildingScanMode === "facade-scan" &&
+              selectedBuildingFacadeSegments.length > 0 && (
+                <div className="mt-3 rounded-md border border-border/70 bg-background/60 p-2">
+                  <div className="text-[11px] font-medium text-foreground">
+                    Façades prises en compte
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {selectedBuildingFacadeSegments.map((segment) => (
+                      <span
+                        key={segment.id}
+                        className="rounded-full border border-border px-2 py-1 text-[10px] text-muted-foreground"
+                      >
+                        {segment.label} • {segment.lengthM.toFixed(0)}m
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-md border border-border px-3 py-2 text-xs"
+                onClick={clearTransientMapUi}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
+                onClick={handleSelectedBuildingScanApply}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </DraggablePanel>
+      )}
+
+      <MapTransientOverlays
+        templateMode={templateMode}
+        rawPath={rawPath}
+        templateConfirmed={templateConfirmed}
+        drawingVertices={drawingVertices}
+        onFinishPencil={handleFinishPencil}
+        onCancelPencil={handleCancelPencil}
+        onFinishObstacle={handleFinishObstacle}
+        onCancelObstacle={handleCancelObstacle}
+        activeTemplateType={activeTemplateType}
+        templatePreview={templatePreview}
+        orbitParams={orbitParams}
+        gridParams={gridParams}
+        facadeParams={facadeParams}
+        pencilParams={pencilParams}
+        onOrbitChange={setOrbitParams}
+        onGridChange={setGridParams}
+        onFacadeChange={setFacadeParams}
+        onPencilChange={setPencilParams}
+        onApply={handleTemplateApply}
+        onCancel={handleTemplateCancel}
+        onFacadeAssist={handleFacadeAssist}
+        onFacadeObjectiveChange={handleFacadeObjectiveChange}
+        onReconstructionPresetSelect={handleReconstructionPresetSelect}
+        onFacadeSegmentSelect={handleFacadeSegmentSelect}
+        onFacadeVariantSelect={handleFacadeVariantSelect}
+        facadeObjective={facadeObjective}
+        facadeAssistBusy={facadeAssistBusy}
+        facadeAssistMessage={facadeAssistMessage}
+        facadeRecommendationBusy={facadeRecommendationBusy}
+        facadeRecommendation={facadeRecommendation}
+        reconstructionShell={reconstructionShell}
+        reconstructionPresets={reconstructionPresets}
+        facadeSegmentOptions={facadeSegmentOptions}
+        selectedFacadeSegmentId={selectedFacadeSegmentId}
+        facadeVariantOptions={facadeVariantOptions}
+        selectedFacadeVariantId={selectedFacadeVariantId}
+        pois={pois}
+      />
+
+      <MapViewChrome
+        isSatellite={mapTypeId === HYBRID_TYPE}
+        onSelectStreet={() => setMapTypeId(ROADMAP_TYPE)}
+        onSelectSatellite={() => setMapTypeId(HYBRID_TYPE)}
+        is3D={false}
+        onSelect2D={() => setIs3D(false)}
+        onSelect3D={handleSelect3D}
+        showRnbLayer={showRnbLayer}
+        onToggleRnbLayer={() => setShowRnbLayer((value) => !value)}
+        showRnbEmptyHint={showRnbLayer && rnbBuildings.length === 0}
+        scanOptionEnabled={selectedRnbBuilding != null}
+        scanOptionDescription={
+          selectedRnbBuilding
+            ? "Ouvre le scan facade du bâtiment sélectionné"
+            : "Sélectionnez un bâtiment sur la carte"
+        }
+        onScanOptionClick={openSelectedBuildingScanPanel}
+        onClearAll={clearTransientMapUi}
+      />
+    </div>
   );
 }
