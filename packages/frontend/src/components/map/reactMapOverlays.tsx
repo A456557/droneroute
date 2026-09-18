@@ -6,7 +6,7 @@ import {
   Layer,
 } from "react-map-gl/maplibre";
 import { buildingApi, type RnbBuilding } from "@/lib/api";
-import { haversineDistance } from "@/lib/geo";
+import { haversineDistance, pointInPolygon } from "@/lib/geo";
 const haversine = haversineDistance;
 
 // Minimal SVG pin builder reused
@@ -419,15 +419,36 @@ export function MapInteraction2D({
       }
 
       if (rnbSelectionEnabled) {
-        // simple point-in-polygon search
-        const selected = rnbBuildings.find((b: any) => {
-          // centroid distance heuristic (fall back to point/footprint
-          // for buildings without a computed centroid)
-          const center = b.centroid ?? b.point ?? b.footprint?.[0];
-          if (!center || typeof center.lat !== "number") return false;
-          const dist = Math.hypot(center.lat - point[0], center.lng - point[1]);
-          return dist < 0.002; // ~200m heuristic
+        // Exact footprint hit first so clicks anywhere on a visible
+        // polygon select it, then nearest centroid within ~200 m.
+        const inFootprint = rnbBuildings.find((b: any) => {
+          const fp = b.footprint;
+          if (!Array.isArray(fp) || fp.length < 3) return false;
+          try {
+            return pointInPolygon(
+              point,
+              fp.map((p: any) => [p.lat, p.lng] as [number, number]),
+            );
+          } catch {
+            return false;
+          }
         });
+        let selected = inFootprint ?? null;
+        if (!selected) {
+          let bestDist = 0.002; // ~200m heuristic
+          for (const b of rnbBuildings) {
+            const center = b.centroid ?? b.point ?? b.footprint?.[0];
+            if (!center || typeof center.lat !== "number") continue;
+            const dist = Math.hypot(
+              center.lat - point[0],
+              center.lng - point[1],
+            );
+            if (dist < bestDist) {
+              bestDist = dist;
+              selected = b;
+            }
+          }
+        }
         if (selected) {
           onSelectRnbBuilding(selected, { lat: point[0], lng: point[1] });
           return;

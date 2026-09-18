@@ -14,6 +14,9 @@ export default defineConfig({
     timeout: 20_000,
   },
   fullyParallel: false,
+  // Limited parallelism: all workers share a single Vite dev server and
+  // live tile CDN endpoints — more workers cause flaky network timeouts.
+  workers: 2,
   retries: 0,
   reporter: [["list"]],
   use: {
