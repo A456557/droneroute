@@ -20,7 +20,7 @@ import {
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
-import { getObstacleWarnings } from "@/lib/geo";
+import { buildRnbExtrusionCollection, getObstacleWarnings } from "@/lib/geo";
 import {
   type BdnbBuildingEnrichment,
   buildingApi,
@@ -3281,6 +3281,23 @@ export function MapView() {
     } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
   }, [obstacles]);
 
+  // RNB footprints with app-estimated heights for the 3D extrusion layer.
+  // Uses the exact BD TOPO height for the selected building when matched,
+  // otherwise the footprint-area heuristic (OSM height tags are sparse).
+  const rnbExtrusionGeo = useMemo(() => {
+    return buildRnbExtrusionCollection(
+      rnbBuildings.map((b) => ({
+        rnbId: b.rnbId,
+        footprint: b.footprint,
+        heightM:
+          b.rnbId === selectedRnbBuilding?.building.rnbId &&
+          selectedBdTopoBuilding?.heightM != null
+            ? estimatedBuildingHeightM(b, selectedBdTopoBuilding)
+            : estimatedBuildingHeightM(b, null),
+      })),
+    );
+  }, [rnbBuildings, selectedRnbBuilding, selectedBdTopoBuilding]);
+
   const drawingPreviewGeo = useMemo(() => {
     if (drawingVertices.length === 0) return null;
     return {
@@ -3919,7 +3936,9 @@ export function MapView() {
             }}
           />
         </Source>
-        {/* Extruded 3D buildings (OpenFreeMap vector tiles, visible in 3D) */}
+        {/* Extruded 3D buildings (OpenFreeMap vector tiles, visible in 3D).
+            Hidden while the RNB layer is on: RNB footprints below carry
+            app-estimated heights instead of the flat render_height fallback. */}
         <Source
           id="ofm-buildings"
           type="vector"
@@ -3931,7 +3950,9 @@ export function MapView() {
             type="fill-extrusion"
             source-layer="building"
             minzoom={13}
-            layout={{ visibility: mapLibre3D ? "visible" : "none" }}
+            layout={{
+              visibility: mapLibre3D && !showRnbLayer ? "visible" : "none",
+            }}
             paint={{
               "fill-extrusion-color": "#c8ccd2",
               "fill-extrusion-height": [
@@ -3944,6 +3965,30 @@ export function MapView() {
                 ["get", "render_min_height"],
                 0,
               ],
+              "fill-extrusion-opacity": 0.85,
+            }}
+          />
+        </Source>
+        {/* RNB footprints extruded with app-estimated heights (visible in 3D
+            while the RNB layer is on; selected building highlighted). */}
+        <Source id="rnb-buildings-3d" type="geojson" data={rnbExtrusionGeo}>
+          <Layer
+            id="rnb-buildings-3d-extrusion"
+            type="fill-extrusion"
+            minzoom={13}
+            layout={{
+              visibility: mapLibre3D && showRnbLayer ? "visible" : "none",
+            }}
+            paint={{
+              "fill-extrusion-color": [
+                "match",
+                ["get", "id"],
+                selectedRnbBuilding?.building.rnbId ?? "__none__",
+                "#14b8a6",
+                "#c8ccd2",
+              ],
+              "fill-extrusion-height": ["coalesce", ["get", "height"], 12],
+              "fill-extrusion-base": 0,
               "fill-extrusion-opacity": 0.85,
             }}
           />

@@ -330,3 +330,38 @@ export function getAirspaceWarnings(
 
   return Array.from(warnings.values());
 }
+
+// ── RNB 3D extrusion ─────────────────────────────────────────
+
+/** Minimal building input for 3D extrusion (heights precomputed by caller). */
+export interface RnbExtrusionInput {
+  rnbId: string;
+  footprint: Array<{ lat: number; lng: number }>;
+  heightM: number;
+}
+
+/**
+ * Build a GeoJSON collection of closed building footprint polygons carrying
+ * per-feature heights for a MapLibre fill-extrusion layer. OpenStreetMap
+ * height tags (`render_height`) are sparse in France, so callers pass
+ * app-estimated heights (footprint-area heuristic or BD TOPO match)
+ * instead of relying on the vector-tile attributes.
+ */
+export function buildRnbExtrusionCollection(
+  buildings: RnbExtrusionInput[],
+): GeoJSON.FeatureCollection<GeoJSON.Geometry> {
+  return {
+    type: "FeatureCollection",
+    features: buildings
+      .filter((b) => Array.isArray(b.footprint) && b.footprint.length >= 3)
+      .map((b) => {
+        const ring = b.footprint.map((p): [number, number] => [p.lng, p.lat]);
+        ring.push(ring[0]);
+        return {
+          type: "Feature",
+          properties: { id: b.rnbId, height: b.heightM },
+          geometry: { type: "Polygon", coordinates: [ring] },
+        };
+      }),
+  } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+}
