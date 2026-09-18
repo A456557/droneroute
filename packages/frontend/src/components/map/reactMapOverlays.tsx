@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useId } from "react";
 import {
   Marker as GLMarker,
   Popup,
@@ -49,6 +49,17 @@ function buildSvgContent(opts: {
   );
 }
 
+// Stable per-instance id for MapLibre sources/layers. react-map-gl throws
+// "source id changed" if the id of a mounted Source ever changes, so random
+// ids (regenerated on every render) crash the whole map.
+function useStableLayerId(prefix: string, explicitId?: string): string {
+  const generated = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  return useMemo(
+    () => explicitId ?? `${prefix}-${generated}`,
+    [explicitId, prefix, generated],
+  );
+}
+
 // Marker overlay for Mapbox
 export function MarkerOverlay2D({
   position,
@@ -84,10 +95,12 @@ export function PopupOverlay2D({ position, content, onClose }: any) {
 }
 
 export function PolylineOverlay2D({
+  id,
   path,
   strokeColor = "#2563eb",
   strokeWidth = 3,
 }: any) {
+  const baseId = useStableLayerId("polyline", id);
   const geojson = useMemo(
     () => ({
       type: "Feature" as const,
@@ -103,13 +116,9 @@ export function PolylineOverlay2D({
     [path],
   );
   return (
-    <Source
-      id={"polyline-" + Math.random().toString(36).slice(2)}
-      type="geojson"
-      data={geojson}
-    >
+    <Source id={baseId} type="geojson" data={geojson}>
       <Layer
-        id={"polyline-layer-" + Math.random().toString(36).slice(2)}
+        id={`${baseId}-line`}
         type="line"
         paint={{ "line-color": strokeColor, "line-width": strokeWidth }}
       />
@@ -118,11 +127,13 @@ export function PolylineOverlay2D({
 }
 
 export function PolygonOverlay2D({
+  id,
   path,
   strokeColor = "#ef4444",
   fillColor = "#ef4444",
   fillOpacity = 0.15,
 }: any) {
+  const baseId = useStableLayerId("polygon", id);
   const coords = [
     path.map((p: any) => [
       p.lng ?? p.longitude ?? p[1],
@@ -138,18 +149,14 @@ export function PolygonOverlay2D({
     [path],
   );
   return (
-    <Source
-      id={"polygon-" + Math.random().toString(36).slice(2)}
-      type="geojson"
-      data={geojson}
-    >
+    <Source id={baseId} type="geojson" data={geojson}>
       <Layer
-        id={"polygon-layer-fill-" + Math.random().toString(36).slice(2)}
+        id={`${baseId}-fill`}
         type="fill"
         paint={{ "fill-color": fillColor, "fill-opacity": fillOpacity }}
       />
       <Layer
-        id={"polygon-layer-line-" + Math.random().toString(36).slice(2)}
+        id={`${baseId}-line`}
         type="line"
         paint={{ "line-color": strokeColor, "line-width": 2 }}
       />
@@ -205,6 +212,7 @@ export function RnbBuildingsLayer2D({
       {buildings.map((building: RnbBuilding) => (
         <PolygonOverlay2D
           key={building.rnbId}
+          id={`rnb-${building.rnbId}`}
           path={building.footprint}
           strokeColor={
             building.rnbId === selectedBuildingId ? "#06b6d4" : "#0ea5e9"
@@ -213,12 +221,15 @@ export function RnbBuildingsLayer2D({
             building.rnbId === selectedBuildingId ? "#22d3ee" : "#38bdf8"
           }
           fillOpacity={0.12}
-          onClick={() =>
+          onClick={() => {
+            const center =
+              building.centroid ?? building.point ?? building.footprint?.[0];
+            if (!center || typeof center.lat !== "number") return;
             onSelectBuilding(building, {
-              lat: building.centroid.lat,
-              lng: building.centroid.lng,
-            })
-          }
+              lat: center.lat,
+              lng: center.lng,
+            });
+          }}
         />
       ))}
     </>
@@ -410,11 +421,11 @@ export function MapInteraction2D({
       if (rnbSelectionEnabled) {
         // simple point-in-polygon search
         const selected = rnbBuildings.find((b: any) => {
-          // centroid distance heuristic
-          const dist = Math.hypot(
-            b.centroid.lat - point[0],
-            b.centroid.lng - point[1],
-          );
+          // centroid distance heuristic (fall back to point/footprint
+          // for buildings without a computed centroid)
+          const center = b.centroid ?? b.point ?? b.footprint?.[0];
+          if (!center || typeof center.lat !== "number") return false;
+          const dist = Math.hypot(center.lat - point[0], center.lng - point[1]);
           return dist < 0.002; // ~200m heuristic
         });
         if (selected) {

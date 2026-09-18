@@ -55,6 +55,7 @@ interface RnbBuildingResponse {
   rnbId: string;
   status: string | null;
   point: LatLng;
+  centroid: LatLng;
   footprint: LatLng[];
   extIds: Array<{
     id: string;
@@ -387,6 +388,7 @@ function normalizeRnbBuilding(
     rnbId: building.rnb_id,
     status: typeof building.status === "string" ? building.status : null,
     point: { lat, lng },
+    centroid: polygonCentroid(footprint),
     footprint,
     extIds,
     bdTopoId:

@@ -2793,6 +2793,46 @@ export function MapView() {
     clearSelectedBuildingUi();
   }, [clearSelectedBuildingUi, resetTemplateState]);
 
+  // Escape returns the map to a neutral state: cancel in-progress drafts
+  // (templates, pencil path, obstacle drawing) and close building panels.
+  // (The App-level handler clears mission placement modes and selection.)
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const tag = (event.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (
+        templateMode ||
+        rawPath.length > 0 ||
+        dragState ||
+        drawingVertices.length > 0
+      ) {
+        clearTransientMapUi();
+        setDrawingVertices([]);
+      }
+      if (
+        selectedRnbBuilding ||
+        showSelectedRnbInfo ||
+        showSelectedBuildingScanPanel
+      ) {
+        clearSelectedBuildingUi();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [
+    templateMode,
+    rawPath,
+    dragState,
+    drawingVertices,
+    selectedRnbBuilding,
+    showSelectedRnbInfo,
+    showSelectedBuildingScanPanel,
+    clearTransientMapUi,
+    clearSelectedBuildingUi,
+    setDrawingVertices,
+  ]);
+
   const applyFacadeScenario = useCallback(
     (
       building: DetectedBuilding,
