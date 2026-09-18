@@ -5,6 +5,7 @@ data/
 .env
 .DS_Store
 .playwright-mcp
+/test-results/
 tsconfig.tsbuildinfo
 *.tsbuildinfo
 *.kmz

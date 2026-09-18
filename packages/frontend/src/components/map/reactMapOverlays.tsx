@@ -1,10 +1,9 @@
-import React, { useEffect, useRef, useMemo } from "react";
+import React, { useEffect, useMemo } from "react";
 import {
   Marker as GLMarker,
   Popup,
   Source,
   Layer,
-  useMap,
 } from "react-map-gl/maplibre";
 import { buildingApi, type RnbBuilding } from "@/lib/api";
 import { haversineDistance } from "@/lib/geo";
@@ -228,19 +227,20 @@ export function RnbBuildingsLayer2D({
 
 // Activates 3D relief (terrain + pitched camera) on the open-source MapLibre
 // view when `active` is true. No API key required (AWS Terrarium tiles).
-export function MapLibre3DController({ active }: { active: boolean }) {
-  const maps = useMap();
-  const mapsRef = useRef(maps);
-  mapsRef.current = maps;
-
+export function MapLibre3DController({
+  active,
+  mapRef,
+}: {
+  active: boolean;
+  mapRef: any;
+}) {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const apply = () => {
       if (cancelled) return;
       try {
-        const ref: any = (mapsRef.current as any)?.default;
-        const map = ref?.getMap ? ref.getMap() : null;
+        const map = mapRef?.current?.getMap ? mapRef.current.getMap() : null;
         if (!map || typeof map.addSource !== "function") {
           timer = setTimeout(apply, 300);
           return;
@@ -278,7 +278,7 @@ export function MapLibre3DController({ active }: { active: boolean }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [active]);
+  }, [active, mapRef]);
 
   return null;
 }
@@ -319,16 +319,18 @@ export function MapInteraction2D({
     const clickHandler = (e: any) => {
       // Layer clicks (obstacle polygons, facade segments) are handled by
       // dedicated handlers below — ignore them here.
-      try {
-        const hits =
-          typeof map.queryRenderedFeatures === "function"
-            ? map.queryRenderedFeatures(e.point, {
-                layers: ["obstacles-fill", "facade-segments-line"],
-              })
-            : [];
-        if (hits && hits.length > 0) return;
-      } catch {
-        // layer not ready yet, fall through to generic handling
+      const clickableLayers = ["obstacles-fill", "facade-segments-line"].filter(
+        (id) => typeof map.getLayer === "function" && map.getLayer(id),
+      );
+      if (clickableLayers.length > 0) {
+        try {
+          const hits = map.queryRenderedFeatures(e.point, {
+            layers: clickableLayers,
+          });
+          if (hits && hits.length > 0) return;
+        } catch {
+          // layer not ready yet, fall through to generic handling
+        }
       }
 
       const point: [number, number] = [e.lngLat.lat, e.lngLat.lng];

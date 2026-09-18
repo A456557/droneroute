@@ -2132,7 +2132,7 @@ function MapTransientOverlays({
       {templateMode === "pencil" &&
         rawPath.length >= 2 &&
         !templateConfirmed && (
-          <div className="absolute right-4 top-4 z-10 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
+          <div className="absolute right-4 top-4 z-20 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
             <button
               className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
               onClick={onFinishPencil}
@@ -2149,7 +2149,7 @@ function MapTransientOverlays({
         )}
 
       {drawingVertices.length >= 3 && (
-        <div className="absolute right-4 top-4 z-10 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
+        <div className="absolute right-4 top-4 z-20 flex gap-2 rounded-lg border border-border bg-background/95 p-2 shadow-lg backdrop-blur-sm">
           <button
             className="rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground"
             onClick={onFinishObstacle}
@@ -3671,6 +3671,8 @@ export function MapView() {
           zoom: defaultMapView.zoom,
           pitch: mapLibre3D ? 60 : 0,
         }}
+        // maplibre-gl v4 lacks GlobeControl required by react-map-gl v8
+        // types (v5-only API); the runtime APIs we use are identical.
         mapLib={maplibregl as any}
         mapStyle={
           mapTypeId === HYBRID_TYPE
@@ -3795,8 +3797,8 @@ export function MapView() {
             type="line"
             paint={{
               "line-color": "#ef4444",
-              "line-width": ["match", ["get", "selected"], true, 3, 2],
-              "line-opacity": ["match", ["get", "selected"], true, 0.85, 0.45],
+              "line-width": ["case", ["get", "selected"], 3, 2],
+              "line-opacity": ["case", ["get", "selected"], 0.85, 0.45],
             }}
           />
         </Source>
@@ -3854,14 +3856,13 @@ export function MapView() {
               filter={["==", ["get", "kind"], "segment"]}
               paint={{
                 "line-color": [
-                  "match",
+                  "case",
                   ["get", "selected"],
-                  true,
                   "#14b8a6",
                   "#f59e0b",
                 ],
-                "line-width": ["match", ["get", "selected"], true, 5, 3],
-                "line-opacity": ["match", ["get", "selected"], true, 0.95, 0.7],
+                "line-width": ["case", ["get", "selected"], 5, 3],
+                "line-opacity": ["case", ["get", "selected"], 0.95, 0.7],
               }}
             />
           </Source>
@@ -3907,7 +3908,7 @@ export function MapView() {
             }}
           />
         </Source>
-        <MapLibre3DController active={mapLibre3D} />
+        <MapLibre3DController active={mapLibre3D} mapRef={mapRef} />
         <AirspaceOverlay />
 
         {/* 2D overlays and interaction adapted for MapLibre */}

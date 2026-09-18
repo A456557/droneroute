@@ -193,6 +193,7 @@ function SharedMissionMap({
           latitude: center[1],
           zoom: 14,
         }}
+        // See MapView: react-map-gl v8 types target maplibre v5 (GlobeControl).
         mapLib={maplibregl as any}
         mapStyle="https://tiles.openfreemap.org/styles/bright"
         style={{ width: "100%", height: "100%" }}

@@ -17,9 +17,11 @@
     "lint:fix": "oxlint --fix packages/",
     "fmt": "prettier --write .",
     "fmt:check": "prettier --check .",
+    "test:e2e": "playwright test",
     "prepare": "lefthook install"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "concurrently": "^10.0.3",
     "lefthook": "^2.1.9",
     "oxlint": "^1.68.0",
