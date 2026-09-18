@@ -4,7 +4,16 @@
 
 DroneRoute is a full-stack web application for visually creating DJI drone waypoint missions
 on an interactive map, exporting them as WPML-compliant KMZ files, and managing saved
-missions. It supports Points of Interest (POIs) that waypoints can orient toward.
+missions. It supports Points of Interest (POIs) that waypoints can orient toward, obstacle
+polygons with conflict warnings, mission templates (orbit, grid, facade, pencil), mission
+sharing via public links, airspace restriction overlays, French building-data workflows
+(RNB / BD TOPO / BDNB), an AI mission assistant, and direct KMZ upload to DJI RC
+controllers over USB.
+
+The map stack is 100% open-source and keyless: MapLibre GL renders OpenFreeMap vector
+tiles (streets + building footprints), Esri World Imagery (satellite), and AWS Terrarium
+terrain (3D relief). Address search uses the French BAN geocoder. No Google Maps API key
+is required.
 
 ## Architecture
 
@@ -12,10 +21,13 @@ missions. It supports Points of Interest (POIs) that waypoints can orient toward
 droneroute/
 ├── packages/
 │   ├── shared/     # TypeScript types shared between frontend & backend
-│   ├── backend/    # Express API server (KMZ gen, persistence, auth)
-│   └── frontend/   # React SPA (map, waypoint editor, mission config)
+│   ├── backend/    # Express API server (KMZ gen, persistence, auth, AI, buildings)
+│   ├── frontend/   # React SPA (map, waypoint editor, mission config)
+│   └── cli/        # `droneroute` CLI: upload KMZ to DJI RC controllers via USB (adb)
+├── e2e/            # Playwright functional tests (Chromium)
 ├── Dockerfile      # Multi-stage build for self-hosting
 ├── docker-compose.yml
+├── playwright.config.ts
 └── SPEC.md         # This file
 ```
 
@@ -23,18 +35,23 @@ droneroute/
 
 ## Tech Stack
 
-| Layer      | Technology                                    |
-| ---------- | --------------------------------------------- |
-| Frontend   | React 19, TypeScript, Vite 6                  |
-| Map        | Leaflet 1.9 + react-leaflet 5 + OpenStreetMap |
-| UI         | shadcn/ui + Tailwind CSS v4                   |
-| State      | Zustand 5                                     |
-| Backend    | Node.js 22, Express 5, TypeScript             |
-| KMZ Gen    | archiver (ZIP) + XML string templates         |
-| KMZ Parse  | jszip + fast-xml-parser                       |
-| Database   | SQLite via better-sqlite3                     |
-| Auth       | bcryptjs + jsonwebtoken (JWT, 7-day expiry)   |
-| Deployment | Docker (multi-stage, Alpine, volume for data) |
+| Layer      | Technology                                                             |
+| ---------- | ---------------------------------------------------------------------- |
+| Frontend   | React 19, TypeScript, Vite 8                                           |
+| Map        | MapLibre GL 2 + react-map-gl 8, OpenFreeMap vector tiles, Esri imagery |
+| Search     | BAN (Base Adresse Nationale) geocoder, no key                          |
+| UI         | shadcn/ui + Tailwind CSS v4, lucide-react, sonner                      |
+| State      | Zustand 5                                                              |
+| Backend    | Node.js 22, Express 5, TypeScript, tsx (dev)                           |
+| KMZ Gen    | archiver (ZIP) + XML string templates                                  |
+| KMZ Parse  | jszip + fast-xml-parser                                                |
+| Database   | SQLite via better-sqlite3                                              |
+| Auth       | bcryptjs + jsonwebtoken (JWT); Google OAuth login in cloud mode        |
+| AI         | Server-side provider: GitHub Models or any OpenAI-compatible endpoint  |
+| CLI        | commander + @inquirer/prompts + chalk, adb for USB upload              |
+| E2E tests  | Playwright + Chromium (`npm run test:e2e`)                             |
+| Unit tests | Vitest (`supertest` for API routes)                                    |
+| Deployment | Docker (multi-stage, Alpine, volume for data), Traefik reverse proxy   |
 
 ## DJI WPML KMZ Format
 
@@ -70,6 +87,8 @@ Both files use KML extended with DJI WPML namespace:
 \* Consumer drone; WPML format may not import into DJI Fly.
 
 ## Data Model
+
+All shared types live in `packages/shared/src/types.ts`.
 
 ### PointOfInterest
 
@@ -109,9 +128,10 @@ DroneRoute-only planning concept and are **not** exported to the DJI KMZ file.
 ```typescript
 interface Waypoint {
   index: number; // 0-based, determines flight order
+  name: string;
   latitude: number;
   longitude: number;
-  height: number; // Meters (relative or absolute per heightMode)
+  height: number; // Meters (per heightMode)
   speed: number; // m/s
   useGlobalSpeed: boolean;
   useGlobalHeight: boolean;
@@ -129,6 +149,8 @@ interface Waypoint {
 
 Waypoints are **sortable** - users can drag-and-drop to reorder them in the sidebar.
 Reordering updates the `index` field and changes the flight path sequence.
+Defaults for new waypoints live in `DEFAULT_WAYPOINT` (30 m height, 7 m/s,
+-45° gimbal).
 
 ### MissionConfig
 
@@ -137,17 +159,18 @@ interface MissionConfig {
   droneEnumValue: number;
   droneSubEnumValue: number;
   payloadEnumValue: number;
-  flyToWaylineMode: "safely" | "pointToPoint";
-  finishAction: "goHome" | "noAction" | "autoLand" | "gotoFirstWaypoint";
+  flyToWaylineMode: FlyToWaylineMode; // "safely" | "pointToPoint"
+  finishAction: FinishAction;
   exitOnRCLost: "goContinue" | "executeLostAction";
-  executeRCLostAction: "goBack" | "landing" | "hover";
-  takeOffSecurityHeight: number; // 1.2-1500m
+  executeRCLostAction: RCLostAction;
+  takeOffSecurityHeight: number;
   globalTransitionalSpeed: number; // m/s
   autoFlightSpeed: number; // m/s
-  heightMode: "EGM96" | "relativeToStartPoint" | "aboveGroundLevel";
+  maxBatteryMinutes: number;
+  heightMode: HeightMode; // "EGM96" | "relativeToStartPoint" | "aboveGroundLevel"
   globalHeadingMode: HeadingMode;
   globalTurnMode: TurnMode;
-  gimbalPitchMode: "manual" | "usePointSetting";
+  gimbalPitchMode: GimbalPitchMode; // "manual" | "usePointSetting"
 }
 ```
 
@@ -167,20 +190,55 @@ interface Mission {
 }
 ```
 
+### SharedMission
+
+Public read-only view of a mission shared via token link (`/shared/:token`).
+Same payload as `Mission` plus `shareToken` and optional `ownerEmail`. Recipients
+can preview it, clone it into their account (auth required), or export the KMZ.
+
+### UserPreferences
+
+```typescript
+interface UserPreferences {
+  unitSystem: "metric" | "imperial";
+  visualization: {
+    viewMode: "2d" | "3d";
+    mapStyle: "satellite" | "street";
+  };
+  missionDefaults: MissionConfig; // Defaults applied to new missions
+}
+```
+
+Persisted per user (`user_preferences` table) and editable from the account panel.
+
+### MapViewState
+
+```typescript
+interface MapViewState {
+  latitude: number;
+  longitude: number;
+  zoom: number;
+}
+```
+
+`DEFAULT_MAP_VIEW` (Labarthe-sur-Lèze, FR — 43.4524351, 1.4005078, zoom 13) is used
+until the backend `/api/config` value (env `DEFAULT_MAP_VIEW`) loads.
+
 ### WaypointAction
 
 Actions are executed sequentially when the drone reaches the waypoint.
 
-| Action       | Description             | Key Parameters                          |
-| ------------ | ----------------------- | --------------------------------------- |
-| takePhoto    | Capture a photo         | payloadPositionIndex, fileSuffix        |
-| startRecord  | Start video recording   | payloadPositionIndex, fileSuffix        |
-| stopRecord   | Stop video recording    | payloadPositionIndex                    |
-| gimbalRotate | Rotate gimbal           | pitch/yaw/roll angles, rotateMode       |
-| rotateYaw    | Rotate aircraft heading | aircraftHeading, pathMode (CW/CCW)      |
-| hover        | Hover in place          | hoverTime (seconds)                     |
-| zoom         | Zoom camera             | focalLength (mm)                        |
-| focus        | Focus camera            | isPointFocus, focusX/Y, isInfiniteFocus |
+| Action             | Description                         | Key Parameters                          |
+| ------------------ | ----------------------------------- | --------------------------------------- |
+| takePhoto          | Capture a photo                     | payloadPositionIndex, fileSuffix        |
+| startRecord        | Start video recording               | payloadPositionIndex, fileSuffix        |
+| stopRecord         | Stop video recording                | payloadPositionIndex                    |
+| gimbalRotate       | Rotate gimbal                       | pitch/yaw/roll angles, rotateMode       |
+| gimbalEvenlyRotate | Smooth gimbal tilt to this waypoint | pitch angle, payloadPositionIndex       |
+| rotateYaw          | Rotate aircraft heading             | aircraftHeading, pathMode (CW/CCW)      |
+| hover              | Hover in place                      | hoverTime (seconds)                     |
+| zoom               | Zoom camera                         | focalLength (mm)                        |
+| focus              | Focus camera                        | isPointFocus, focusX/Y, isInfiniteFocus |
 
 ### Heading Modes
 
@@ -203,16 +261,32 @@ Actions are executed sequentially when the drone reaches the waypoint.
 
 ## Features
 
-### Map Interaction
+### Map Interaction (MapLibre, no API key)
 
-- **Click to add waypoints** - Toggle between Add and Pan mode via toolbar
-- **Drag waypoint markers** - Reposition by dragging numbered circle markers
-- **Flight path polyline** - Dashed blue line connecting waypoints in order
-- **POI markers** - Distinct target-style markers for Points of Interest
-- **POI pointing lines** - Dotted red lines from waypoints to their referenced POI
-- **Add POI mode** - Separate toolbar button for placing POIs on the map
-- **Obstacle polygons** - Draw polygon obstacles on the map; flight segments crossing them are shown in red
-- **Obstacle editing** - Click to select an obstacle, drag vertex handles to reshape, click midpoint handles to add vertices, right-click a vertex to remove it
+- **Basemaps** — OpenFreeMap `bright` vector style in Street mode (roads +
+  building footprints); Esri World Imagery in Satellite mode
+- **2D / 3D views** — 3D pitches the camera and enables AWS Terrarium terrain
+  relief plus extruded OpenFreeMap buildings; animated transition both ways
+- **Click to add waypoints/POIs/obstacles** — Toolbar modes (`W`/`P`/`B`) plus
+  orbit/grid/facade/pencil template drag interactions
+- **Drag markers** — Reposition waypoints, POIs, and obstacle vertices by dragging
+- **Flight path** — Dashed blue segments (red where the path crosses an obstacle),
+  green dashed lines from `towardPOI` waypoints to their POI, red heading ticks,
+  camera-frustum footprint for the selected waypoint
+- **Address search** — BAN (Base Adresse Nationale) geocoder with result picker
+  that flies the map to the match; no key required
+- **Airspace overlay** — Restriction zones fetched per viewport from
+  country providers (DGAC/France, ENAIRE/Spain, NATS/UK); prohibited zones in
+  red, restricted in orange, with hover details
+- **RNB buildings layer** — French building footprints (RNB registry) with
+  selection, BD TOPO matching, and BDNB enrichment (fault-tolerant: a failing
+  upstream table degrades to partial data, never a 502)
+- **Building workflows** — Facade-scan and 3D-reconstruction mission generation
+  from a selected building, facade copilot recommendations, reconstruction demo
+- **Mission templates** — Orbit, grid survey, facade scan, and freehand pencil
+  path, all previewed live on the map before applying
+- **Keyboard shortcuts** — `W` waypoint, `P` POI, `O`/`G`/`F`/`Z` templates,
+  `B` obstacle, `Esc` cancel, `Delete` remove selection
 
 ### Sidebar
 
@@ -252,21 +326,63 @@ Actions are executed sequentially when the drone reaches the waypoint.
   - Time is calculated per-segment using each waypoint's speed
     (or global `autoFlightSpeed` when `useGlobalSpeed` is true)
 
+### Missions, Sharing & Admin
+
+- **Save & load** — Authenticated users persist missions to SQLite; "My routes"
+  page lists, renames, and deletes them
+- **Share links** — `POST /api/missions/:id/share` mints a token link
+  (`/shared/:token`); public preview page with stats, in-editor opening, clone
+  to account, and direct KMZ export; `DELETE .../share` revokes
+- **Back office** (cloud mode, admin only) — List users, ban/unban,
+  promote/demote admins
+- **Preferences** — Unit system, 2D/3D + street/satellite defaults, and mission
+  defaults synced per user
+- **Mission assistant** — Server-side AI copilot (`POST /api/assistant/mission`)
+  answering planning questions with mission stats; GitHub Models or any
+  OpenAI-compatible endpoint, selected via env
+- **CLI upload** — `npx droneroute mission.kmz` pushes the KMZ to a USB-connected
+  DJI RC controller (adb autodetect)
+
 ### Backend API
 
-| Method   | Path                    | Description                    |
-| -------- | ----------------------- | ------------------------------ |
-| `GET`    | `/api/health`           | Health check                   |
-| `POST`   | `/api/auth/register`    | Register new user              |
-| `POST`   | `/api/auth/login`       | Login, returns JWT             |
-| `GET`    | `/api/missions`         | List user's missions (auth)    |
-| `GET`    | `/api/missions/:id`     | Get single mission             |
-| `POST`   | `/api/missions`         | Create mission                 |
-| `PUT`    | `/api/missions/:id`     | Update mission                 |
-| `DELETE` | `/api/missions/:id`     | Delete mission (auth, owner)   |
-| `POST`   | `/api/kmz/generate`     | Generate KMZ from POST body    |
-| `GET`    | `/api/kmz/download/:id` | Download KMZ for saved mission |
-| `POST`   | `/api/kmz/import`       | Upload KMZ, parse to JSON      |
+| Method   | Path                                   | Description                                        |
+| -------- | -------------------------------------- | -------------------------------------------------- |
+| `GET`    | `/api/health`                          | Health check                                       |
+| `GET`    | `/api/config`                          | Public config (self-hosted flag, map view)         |
+| `POST`   | `/api/auth/register`                   | Register new user                                  |
+| `POST`   | `/api/auth/login`                      | Login, returns JWT                                 |
+| `POST`   | `/api/auth/google`                     | Google OAuth login (cloud mode)                    |
+| `POST`   | `/api/auth/change-password`            | Change password (self-hosted only)                 |
+| `GET`    | `/api/missions`                        | List user's missions (auth)                        |
+| `GET`    | `/api/missions/:id`                    | Get single mission                                 |
+| `POST`   | `/api/missions`                        | Create mission                                     |
+| `PUT`    | `/api/missions/:id`                    | Update mission                                     |
+| `DELETE` | `/api/missions/:id`                    | Delete mission (auth, owner)                       |
+| `POST`   | `/api/missions/:id/share`              | Enable sharing, returns token + URL                |
+| `DELETE` | `/api/missions/:id/share`              | Revoke sharing                                     |
+| `GET`    | `/api/shared/:token`                   | Public shared mission                              |
+| `POST`   | `/api/shared/:token/clone`             | Clone shared mission (auth)                        |
+| `POST`   | `/api/kmz/generate`                    | Generate KMZ from POST body (≥2 WPs)               |
+| `GET`    | `/api/kmz/download/:missionId`         | Download KMZ for saved mission                     |
+| `POST`   | `/api/kmz/import`                      | Upload KMZ, parse to JSON                          |
+| `GET`    | `/api/airspace/zones`                  | Restriction zones for a bounding box               |
+| `GET`    | `/api/airspace/providers`              | Available country providers                        |
+| `GET`    | `/api/buildings/rnb`                   | RNB buildings for a bounding box                   |
+| `POST`   | `/api/buildings/bdtopo-match`          | Match building against BD TOPO                     |
+| `POST`   | `/api/buildings/bdnb-enrich`           | BDNB enrichment (partial data on upstream failure) |
+| `POST`   | `/api/buildings/detect`                | Detect nearest building footprint                  |
+| `POST`   | `/api/buildings/recommend-facade-scan` | Facade-scan copilot recommendation                 |
+| `POST`   | `/api/assistant/mission`               | AI mission assistant answer                        |
+| `GET`    | `/api/preferences`                     | Get user preferences (auth)                        |
+| `PUT`    | `/api/preferences`                     | Save user preferences (auth)                       |
+| `GET`    | `/api/admin/users`                     | List users (admin)                                 |
+| `POST`   | `/api/admin/users/:id/ban`             | Ban user (admin)                                   |
+| `POST`   | `/api/admin/users/:id/unban`           | Unban user (admin)                                 |
+| `POST`   | `/api/admin/users/:id/promote`         | Grant admin (admin)                                |
+| `POST`   | `/api/admin/users/:id/demote`          | Revoke admin (admin)                               |
+
+Rate limiting applies globally plus stricter limits on auth, KMZ, airspace,
+and assistant routes. Uploads are capped at 50 MB.
 
 ### KMZ Generation
 
@@ -280,7 +396,8 @@ The backend generates a valid DJI WPML KMZ containing:
 
 When a waypoint uses `towardPOI` heading mode, the backend computes the
 bearing from the waypoint to the referenced POI and emits it as a
-`waypointPoiPoint` element with the POI's coordinates.
+`waypointPoiPoint` element with the POI's coordinates. Geometry is validated
+server-side before generation (minimum 2 waypoints).
 
 ### KMZ Import
 
@@ -298,22 +415,34 @@ Upload a `.kmz` file to parse it back into editable mission data:
 CREATE TABLE users (
   id TEXT PRIMARY KEY,
   email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
+  password_hash TEXT,              -- NULL for Google-only accounts
+  google_id TEXT,                  -- NULL unless linked
+  email_verified INTEGER NOT NULL DEFAULT 0,
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  is_banned INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
 
-    CREATE TABLE missions (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      user_id TEXT,
-      config TEXT NOT NULL,       -- JSON
-      waypoints TEXT NOT NULL,    -- JSON
-      pois TEXT DEFAULT '[]',     -- JSON
-      obstacles TEXT DEFAULT '[]', -- JSON
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now')),
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
+CREATE TABLE missions (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  user_id TEXT,                    -- NULL for anonymous missions
+  config TEXT NOT NULL,            -- JSON
+  waypoints TEXT NOT NULL,         -- JSON
+  pois TEXT NOT NULL DEFAULT '[]', -- JSON
+  obstacles TEXT NOT NULL DEFAULT '[]', -- JSON (added by migration)
+  share_token TEXT UNIQUE,         -- NULL unless shared
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE user_preferences (
+  user_id TEXT PRIMARY KEY,
+  preferences TEXT NOT NULL DEFAULT '{}', -- JSON (UserPreferences)
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
 ```
 
 ## Self-Hosting with Docker
@@ -333,11 +462,23 @@ The Traefik dashboard is at `http://localhost:8080`.
 
 ### Configuration
 
-| Environment Variable | Default                            | Description          |
-| -------------------- | ---------------------------------- | -------------------- |
-| `PORT`               | `3001`                             | Server port          |
-| `JWT_SECRET`         | `change-this-secret-in-production` | JWT signing secret   |
-| `DB_PATH`            | `/app/data/droneroute.db`          | SQLite database path |
+| Environment Variable                     | Default                            | Description                            |
+| ---------------------------------------- | ---------------------------------- | -------------------------------------- |
+| `PORT`                                   | `3001`                             | Server port                            |
+| `JWT_SECRET`                             | `change-this-secret-in-production` | JWT signing secret                     |
+| `DB_PATH`                                | `/app/data/droneroute.db`          | SQLite database path                   |
+| `SELF_HOSTED`                            | `true`                             | Single-account personal instance mode  |
+| `CORS_ORIGIN`                            | _(unset)_                          | Allowed origins for split deployments  |
+| `ADMIN_EMAIL`                            | _(unset)_                          | Admin user (cloud mode only)           |
+| `GOOGLE_CLIENT_ID`                       | _(unset)_                          | Google OAuth login (cloud mode only)   |
+| `AI_PROVIDER`                            | _(unset)_                          | `github-models` or `openai-compatible` |
+| `GITHUB_MODELS_TOKEN`                    | _(unset)_                          | Token with `models:read` scope         |
+| `GITHUB_MODELS_MODEL`                    | _(unset)_                          | e.g. `openai/gpt-4.1`                  |
+| `AI_API_URL` / `AI_API_KEY` / `AI_MODEL` | _(unset)_                          | OpenAI-compatible endpoint             |
+| `DEFAULT_MAP_VIEW`                       | `43.4524351,1.4005078,13`          | `lat,lng[,zoom]` shown on load         |
+
+No map API key is required: tiles (OpenFreeMap, Esri), terrain (AWS Terrarium),
+and search (BAN) are all keyless.
 
 ### Data Persistence
 
@@ -374,11 +515,24 @@ Frontend proxies `/api` requests to the backend via Vite dev server.
 npm install
 npm run build -w packages/shared    # Shared types first
 npm run build -w packages/backend   # Backend TypeScript → dist/
-npm run build -w packages/frontend  # Frontend Vite → dist/
+npm run build -w packages/frontend  # Frontend tsc + Vite → dist/
+npm run build -w packages/cli      # CLI TypeScript → dist/
 ```
 
 The shared package compiles TypeScript types to `packages/shared/dist/` so the
 backend's compiled JS can import them at runtime without needing `tsx`.
+
+### Testing
+
+```bash
+npm run test -w packages/backend   # Vitest unit + API tests (supertest)
+npm run test -w packages/frontend  # Vitest unit tests
+npm run test:e2e                    # Playwright/Chromium functional tests (e2e/)
+```
+
+The e2e suite (`e2e/smoke.spec.ts`) boots against the dev servers and verifies:
+OpenFreeMap tiles load with zero Google requests, waypoint placement + valid KMZ
+download, basemap/satellite/3D switching, and BAN search.
 
 ### Project Structure
 
@@ -388,40 +542,53 @@ packages/
     src/types.ts                     # All TypeScript types and constants
     tsconfig.json                    # Compiles to dist/ for backend runtime
   backend/src/
-    index.ts                       # Express app entry
-    models/db.ts                   # SQLite setup
-    routes/auth.ts                 # Auth endpoints
+    index.ts                       # Express app entry (+ /api/health, /api/config)
+    models/db.ts                   # SQLite setup + migrations
+    middleware/                    # auth, rateLimit
+    lib/wpml.ts                    # WPML XML builders
+    lib/config.ts                  # Env config (incl. DEFAULT_MAP_VIEW parsing)
+    routes/auth.ts                 # Email + Google OAuth login, password change
     routes/missions.ts             # Mission CRUD
-    routes/kmz.ts                  # KMZ gen/import endpoints
+    routes/shared.ts               # Share/unshare/clone/public fetch
+    routes/kmz.ts                  # KMZ gen/download/import endpoints
+    routes/airspace.ts             # Restriction zones + providers
+    routes/assistant.ts            # AI mission copilot endpoint
+    routes/buildings.ts            # RNB / BD TOPO / BDNB / detect / facade-scan
+    routes/preferences.ts          # Per-user preferences
+    routes/admin.ts                # Back-office user management
     services/kmzGenerator.ts       # archiver-based KMZ builder
     services/kmzParser.ts          # jszip + XML parser
     services/authService.ts        # JWT + bcrypt
-    middleware/auth.ts             # Auth middleware
-    lib/wpml.ts                    # WPML XML builders
+    services/assistantAi.ts        # AI provider abstraction
+    services/missionValidation.ts  # Server-side geometry validation
+    services/airspace/             # Country providers (dgac, enaire, nats)
   frontend/src/
     main.tsx                       # Entry point
-    App.tsx                        # Root layout (sidebar + map)
-    store/missionStore.ts          # Zustand state
+    App.tsx                        # Root layout (sidebar + map) + shortcuts
+    store/                         # Zustand stores (mission, auth, config, preferences, airspace)
+    lib/                           # api client, geo, templates, units
     components/
       map/
-        MapView.tsx                # Leaflet map container
-        WaypointMarker.tsx         # Draggable numbered markers
-        PoiMarker.tsx              # POI target markers
-        MapToolbar.tsx             # Add/Pan/POI/Obstacle/Clear tools
-        ObstacleDrawHandler.tsx    # Click-to-draw polygon interaction
-        ObstaclePolygon.tsx        # Polygon rendering + vertex editing
-      waypoint/
-        WaypointList.tsx           # Sortable waypoint list
-        WaypointEditor.tsx         # Edit selected waypoint
-        ActionEditor.tsx           # Add/configure actions
-      mission/
-        MissionConfig.tsx          # Global mission settings
-        PoiList.tsx                # POI list + editor
-        ObstacleList.tsx           # Obstacle list + editor
-      ui/                          # shadcn/ui primitives
+        MapView.tsx                # MapLibre map container (2D/3D, single engine)
+        reactMapOverlays.tsx       # RNB layer, 2D interactions, 3D controller
+        AirspaceOverlay.tsx        # Restriction zones + tooltips
+        MapToolbar.tsx             # Add/WP/POI/obstacle/template tools
+        MapSearch.tsx              # (in MapView) BAN address search
+        TemplateConfigPanel.tsx    # Template parameter editors
+      waypoint/                    # Sortable list + waypoint/action editors
+      mission/                     # Mission config, POI/obstacle lists
+      routes/                      # My-routes page + shared-mission page
+      auth/                        # Login, register, account, admin UI
+  cli/src/
+    index.ts                       # `droneroute <mission.kmz>` entry (commander)
+    device.ts / adb.ts             # Controller detection over USB
+    volumes.ts                     # Mounted-storage fallback detection
+    upload.ts                      # KMZ placement into mission slots
+    constants.ts                   # WPML/controller paths
+  e2e/smoke.spec.ts                # Playwright functional tests
 ```
 
-## UI Layout
+### UI Layout
 
 ```
 +------------------------------------------------------------------+
@@ -429,9 +596,9 @@ packages/
 | [Save] [Export KMZ] [Import]                                     |
 +------------------+-----------------------------------------------+
 | v WAYPOINTS (3)  |                                               |
-| [=] 1  50m 7m/s  |                                               |
-| [=] 2  75m 7m/s  |        Interactive Map                        |
-| [=] 3  60m 10m/s |        (Leaflet + OpenStreetMap)               |
+| [=] 1  30m 7m/s  |                                               |
+| [=] 2  30m 7m/s  |        Interactive Map                        |
+| [=] 3  30m 7m/s  |        (MapLibre + OpenFreeMap, no key)        |
 |                  |                                     [Add WP]  |
 | v POIS (1)       |        o---1---2---3  (flight path) [Add POI] |
 | [*] Tower        |        |             [Obstacle]     [Clear]    |
@@ -442,7 +609,7 @@ packages/
 | > MISSION CONFIG |                                               |
 |                  |                                               |
 | v EDIT WP 2      |                                               |
-| Alt: [75] m      |                                               |
+| Alt: [30] m      |                                               |
 | Speed: [7] m/s   |                                               |
 | Gimbal: [-45] d  |                                               |
 | Heading: towardPOI|                                              |
