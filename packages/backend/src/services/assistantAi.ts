@@ -10,8 +10,13 @@ export type AssistantResponseDraft = {
   suggestedActions: SuggestedAction[];
 };
 
+export type AssistantResponseSource =
+  | "github-models"
+  | "openai-compatible"
+  | "ollama";
+
 export type AssistantAiResponse = AssistantResponseDraft & {
-  source: "github-models" | "openai-compatible";
+  source: AssistantResponseSource;
   usedModel: string;
 };
 
@@ -35,6 +40,12 @@ type ProviderConfig =
       endpoint: string;
       token: string;
       model: string;
+    }
+  | {
+      provider: "ollama";
+      endpoint: string;
+      token: string;
+      model: string;
     };
 
 type GenerateMissionAssistantParams = {
@@ -46,6 +57,40 @@ type GenerateMissionAssistantParams = {
   stats: Record<string, number | string | boolean | null>;
   maxBatteryMinutes: number;
   draft: AssistantResponseDraft;
+  terrain?: {
+    groundMinM: number | null;
+    groundMaxM: number | null;
+    reliefM: number | null;
+    aglMinM: number | null;
+    aglMaxM: number | null;
+    coveragePct: number | null;
+    source: string;
+  } | null;
+  site?: {
+    meteo: {
+      windMs: number | null;
+      gustsMs: number | null;
+      precipitationMm: number | null;
+      weatherCode: number | null;
+      label: string;
+    } | null;
+    parcelle: {
+      commune: string | null;
+      section: string | null;
+      numero: string | null;
+      contenanceM2: number | null;
+    } | null;
+    urbanisme: {
+      documentType: string | null;
+      zoneLibelle: string | null;
+      zoneLibelleLong: string | null;
+    } | null;
+    airspace: {
+      prohibited: number;
+      restricted: number;
+      names: string[];
+    } | null;
+  } | null;
 };
 
 const GITHUB_MODELS_ENDPOINT =
@@ -54,6 +99,10 @@ const GITHUB_MODELS_API_VERSION = "2026-03-10";
 const GITHUB_MODELS_DEFAULT_MODEL = "openai/gpt-4.1";
 const OPENAI_COMPATIBLE_DEFAULT_ENDPOINT =
   "https://api.openai.com/v1/chat/completions";
+// Ollama local (modèles open-source : mistral, llama3.1, qwen2.5...).
+// En Docker, utiliser http://ollama:11434/v1/chat/completions.
+const OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434/v1/chat/completions";
+const OLLAMA_DEFAULT_MODEL = "mistral:latest";
 
 function trimStringArray(
   value: unknown,
@@ -110,6 +159,17 @@ function resolveProviderConfig(
 ): ProviderConfig {
   const provider = env.AI_PROVIDER?.trim();
 
+  // 100% open-source local : Ollama + Mistral/Llama (endpoint OpenAI-compatible).
+  // Ex : AI_PROVIDER=ollama AI_MODEL=mistral:latest ollama pull mistral
+  if (provider === "ollama") {
+    return {
+      provider: "ollama",
+      endpoint: env.AI_API_URL?.trim() || OLLAMA_DEFAULT_ENDPOINT,
+      token: env.AI_API_KEY?.trim() || "ollama",
+      model: env.AI_MODEL?.trim() || OLLAMA_DEFAULT_MODEL,
+    };
+  }
+
   if (provider === "github-models" || (!provider && env.GITHUB_MODELS_TOKEN)) {
     if (!env.GITHUB_MODELS_TOKEN) {
       throw new AssistantAiConfigError(
@@ -146,16 +206,22 @@ function resolveProviderConfig(
   }
 
   throw new AssistantAiConfigError(
-    "Mission assistant AI provider is not configured. Set AI_PROVIDER=github-models with GITHUB_MODELS_TOKEN, or AI_PROVIDER=openai-compatible with AI_API_KEY and AI_MODEL.",
+    "Mission assistant AI provider is not configured. Set AI_PROVIDER=ollama (local Mistral via Ollama, recommandé open-source), AI_PROVIDER=github-models with GITHUB_MODELS_TOKEN, or AI_PROVIDER=openai-compatible with AI_API_KEY and AI_MODEL.",
   );
 }
 
 function buildMessages(params: GenerateMissionAssistantParams) {
+  const terrainLine = params.terrain
+    ? `Terrain IGN (${params.terrain.source}): sol ${params.terrain.groundMinM ?? "?"}..${params.terrain.groundMaxM ?? "?"} m, relief ${params.terrain.reliefM ?? "?"} m, AGL ${params.terrain.aglMinM ?? "?"}..${params.terrain.aglMaxM ?? "?"} m, couverture MNT ${params.terrain.coveragePct ?? 0}%.`
+    : "Terrain IGN indisponible pour cette mission.";
+  const siteLine = params.site
+    ? `Site: météo ${params.site.meteo ? `${params.site.meteo.label}, vent ${params.site.meteo.windMs ?? "?"} m/s, rafales ${params.site.meteo.gustsMs ?? "?"} m/s, pluie ${params.site.meteo.precipitationMm ?? "?"} mm` : "indisponible"} ; parcelle ${params.site.parcelle ? `${params.site.parcelle.commune ?? "?"} section ${params.site.parcelle.section ?? "?"} n°${params.site.parcelle.numero ?? "?"}` : "hors cadastre"} ; urbanisme ${params.site.urbanisme ? `${params.site.urbanisme.documentType ?? "?"} zone ${params.site.urbanisme.zoneLibelle ?? "?"} (${params.site.urbanisme.zoneLibelleLong ?? "?"})` : "inconnu"} ; espace aérien ${params.site.airspace ? `${params.site.airspace.prohibited} interdite(s), ${params.site.airspace.restricted} restreinte(s) au centroïde` : "inconnu"}.`
+    : "Contexte site indisponible.";
   return [
     {
       role: "system",
       content:
-        "You are DroneRoute's mission planning assistant. Answer in French only. Use only the mission context provided by the server. Be operational, concrete, and concise. Do not invent drone, weather, camera, or terrain details that are not present in the input.",
+        "You are DroneRoute's mission planning assistant for construction-site (chantier) analysis. Answer in French only. Use only the mission context provided by the server. Be operational, concrete, and concise. Vérifie que le trajet drone est adapté au relief : AGL constant, marges obstacles, pente/terrassement, autonomie. Do not invent drone, weather, camera, or terrain details that are not present in the input.",
     },
     {
       role: "developer",
@@ -166,13 +232,17 @@ function buildMessages(params: GenerateMissionAssistantParams) {
       role: "user",
       content: JSON.stringify(
         {
-          task: "Analyze the mission and improve the server draft for the end user.",
+          task: "Analyze the mission and improve the server draft for the end user. Check that the drone path fits the terrain.",
           missionName: params.missionName,
           userPrompt: params.prompt,
           templateMode: params.templateMode,
           missionProfile: params.profile,
           focus: params.focus,
           stats: params.stats,
+          terrain: params.terrain ?? null,
+          site: params.site ?? null,
+          terrainHint: terrainLine,
+          siteHint: siteLine,
           maxBatteryMinutes: params.maxBatteryMinutes,
           draft: params.draft,
         },

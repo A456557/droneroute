@@ -41,6 +41,8 @@ services:
       - AI_API_URL=${AI_API_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
+      - IGN_ALTIMETRIE_RESOURCE=${IGN_ALTIMETRIE_RESOURCE:-ign_rge_alti_wld}
+      - IGN_ALTIMETRIE_BASE=${IGN_ALTIMETRIE_BASE:-}
       - DEFAULT_MAP_VIEW=${DEFAULT_MAP_VIEW:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       # Default map view on load (optional). Format: "lat,lng" or "lat,lng,zoom".

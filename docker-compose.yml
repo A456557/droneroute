@@ -38,10 +38,27 @@ services:
       - AI_API_URL=${AI_API_URL:-}
       - AI_API_KEY=${AI_API_KEY:-}
       - AI_MODEL=${AI_MODEL:-}
+      # Terrain chantier open-source (MNT IGN, Licence Ouverte).
+      - IGN_ALTIMETRIE_RESOURCE=${IGN_ALTIMETRIE_RESOURCE:-ign_rge_alti_wld}
+      - IGN_ALTIMETRIE_BASE=${IGN_ALTIMETRIE_BASE:-}
       - DEFAULT_MAP_VIEW=${DEFAULT_MAP_VIEW:-}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-}
       # Default map view on load (optional). Format: "lat,lng" or "lat,lng,zoom".
       # - DEFAULT_MAP_VIEW=41.3874,2.1686,13
+      # IA locale open-source (Ollama + Mistral) : décommentez pour activer.
+      # Voir https://ollama.com — puis : ollama pull mistral
+      # - AI_PROVIDER=ollama
+      # - AI_API_URL=http://ollama:11434/v1/chat/completions
+      # - AI_MODEL=mistral:latest
+    # Service IA locale (optionnel, profil ollama) :
+    #   docker compose --profile ollama up -d
+    # ollama:
+    #   image: ollama/ollama:latest
+    #   container_name: droneroute-ollama
+    #   profiles: ["ollama"]
+    #   volumes:
+    #     - ollama-data:/root/.ollama
+    #   restart: unless-stopped
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.droneroute.rule=Host(`droneroute.localhost`)"
@@ -51,3 +68,4 @@ services:
 
 volumes:
   droneroute-data:
+  # ollama-data:

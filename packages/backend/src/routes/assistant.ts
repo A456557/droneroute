@@ -21,6 +21,44 @@ type MissionAssistantRequest = {
   waypoints?: unknown;
   pois?: unknown;
   obstacles?: unknown;
+  terrain?: unknown;
+  site?: unknown;
+};
+
+export type TerrainSnapshot = {
+  groundMinM: number | null;
+  groundMaxM: number | null;
+  reliefM: number | null;
+  aglMinM: number | null;
+  aglMaxM: number | null;
+  coveragePct: number | null;
+  source: string;
+};
+
+export type SiteSnapshot = {
+  meteo: {
+    windMs: number | null;
+    gustsMs: number | null;
+    precipitationMm: number | null;
+    weatherCode: number | null;
+    label: string;
+  } | null;
+  parcelle: {
+    commune: string | null;
+    section: string | null;
+    numero: string | null;
+    contenanceM2: number | null;
+  } | null;
+  urbanisme: {
+    documentType: string | null;
+    zoneLibelle: string | null;
+    zoneLibelleLong: string | null;
+  } | null;
+  airspace: {
+    prohibited: number;
+    restricted: number;
+    names: string[];
+  } | null;
 };
 
 type SuggestedAction = {
@@ -33,8 +71,10 @@ type MissionAssistantResponse = {
   bullets: string[];
   warnings: string[];
   suggestedActions: SuggestedAction[];
-  source: "github-models" | "openai-compatible";
+  source: "github-models" | "openai-compatible" | "ollama" | "local-rules";
   usedModel: string;
+  terrain?: TerrainSnapshot | null;
+  site?: SiteSnapshot | null;
 };
 
 type MissionStats = {
@@ -401,12 +441,160 @@ function buildProfileWarnings(
   return warnings;
 }
 
+function buildTerrainWarnings(terrain: TerrainSnapshot | null): string[] {
+  if (!terrain) return [];
+  const warnings: string[] = [];
+  if ((terrain.coveragePct ?? 0) < 100 && (terrain.coveragePct ?? 0) > 0) {
+    warnings.push(
+      `MNT IGN partiel: ${terrain.coveragePct}% des points couverts. Vérifiez manuellement les zones sans altitude.`,
+    );
+  }
+  if (
+    terrain.aglMinM !== null &&
+    terrain.aglMinM < 15 &&
+    (terrain.coveragePct ?? 0) > 50
+  ) {
+    warnings.push(
+      `Garde au sol faible: AGL min ${Math.round(terrain.aglMinM)} m d'après le MNT IGN. Relevez le vol ou drapez à AGL constant.`,
+    );
+  }
+  if (terrain.reliefM !== null && terrain.reliefM > 30) {
+    warnings.push(
+      `Relief marqué: ${Math.round(terrain.reliefM)} m de dénivelé sol sur l'emprise (RGE ALTI). Un vol à altitude constante n'est pas adapté — utilisez le drapage AGL.`,
+    );
+  }
+  return warnings;
+}
+
+function buildSiteWarnings(site: SiteSnapshot | null): string[] {
+  if (!site) return [];
+  const warnings: string[] = [];
+  const wind = site.meteo?.windMs;
+  const gusts = site.meteo?.gustsMs;
+  const rain = site.meteo?.precipitationMm;
+  if (wind !== null && wind !== undefined && wind > 10) {
+    warnings.push(
+      `Météo (Open-Meteo): vent ${wind.toFixed(1)} m/s — au-delà de 10 m/s le vol chantier devient risqué.`,
+    );
+  } else if (gusts !== null && gusts !== undefined && gusts > 15) {
+    warnings.push(
+      `Météo (Open-Meteo): rafales ${gusts.toFixed(1)} m/s — prévoyez une marge et un créneau plus calme.`,
+    );
+  }
+  if (rain !== null && rain !== undefined && rain > 1) {
+    warnings.push(
+      `Météo (Open-Meteo): ${rain.toFixed(1)} mm de précipitations en cours — reportez le vol ou protégez le capteur.`,
+    );
+  }
+  if (site.airspace && site.airspace.prohibited > 0) {
+    warnings.push(
+      `Espace aérien: ${site.airspace.prohibited} zone(s) interdite(s) au centroïde (${site.airspace.names.slice(0, 2).join("; ") || "DGAC"}). Vol interdit sans autorisation.`,
+    );
+  } else if (site.airspace && site.airspace.restricted > 0) {
+    warnings.push(
+      `Espace aérien: ${site.airspace.restricted} zone(s) restreinte(s) au centroïde — vérifiez les hauteurs max et NOTAM avant vol.`,
+    );
+  }
+  return warnings;
+}
+
+function normalizeTerrainSnapshot(value: unknown): TerrainSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const t = value as Record<string, unknown>;
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const coverage =
+    typeof t.coveragePct === "number" && Number.isFinite(t.coveragePct)
+      ? Math.max(0, Math.min(100, Math.round(t.coveragePct)))
+      : null;
+  if (
+    num(t.groundMinM) === null &&
+    num(t.groundMaxM) === null &&
+    num(t.aglMinM) === null
+  ) {
+    return null;
+  }
+  return {
+    groundMinM: num(t.groundMinM),
+    groundMaxM: num(t.groundMaxM),
+    reliefM: num(t.reliefM),
+    aglMinM: num(t.aglMinM),
+    aglMaxM: num(t.aglMaxM),
+    coveragePct: coverage,
+    source:
+      typeof t.source === "string" && t.source.trim()
+        ? t.source.trim()
+        : "IGN Geoplateforme altimetrie",
+  };
+}
+
+function normalizeSiteSnapshot(value: unknown): SiteSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const s = value as Record<string, unknown>;
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const txt = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+
+  const meteoRaw = s.meteo as Record<string, unknown> | null | undefined;
+  const meteo =
+    meteoRaw && typeof meteoRaw === "object"
+      ? {
+          windMs: num(meteoRaw.windMs),
+          gustsMs: num(meteoRaw.gustsMs),
+          precipitationMm: num(meteoRaw.precipitationMm),
+          weatherCode: num(meteoRaw.weatherCode),
+          label: txt(meteoRaw.label) ?? "inconnue",
+        }
+      : null;
+
+  const parcRaw = s.parcelle as Record<string, unknown> | null | undefined;
+  const parcelle =
+    parcRaw && typeof parcRaw === "object"
+      ? {
+          commune: txt(parcRaw.commune),
+          section: txt(parcRaw.section),
+          numero: txt(parcRaw.numero),
+          contenanceM2: num(parcRaw.contenanceM2),
+        }
+      : null;
+
+  const urbaRaw = s.urbanisme as Record<string, unknown> | null | undefined;
+  const urbanisme =
+    urbaRaw && typeof urbaRaw === "object"
+      ? {
+          documentType: txt(urbaRaw.documentType),
+          zoneLibelle: txt(urbaRaw.zoneLibelle),
+          zoneLibelleLong: txt(urbaRaw.zoneLibelleLong),
+        }
+      : null;
+
+  const airRaw = s.airspace as Record<string, unknown> | null | undefined;
+  const airspace =
+    airRaw && typeof airRaw === "object"
+      ? {
+          prohibited:
+            typeof airRaw.prohibited === "number" ? airRaw.prohibited : 0,
+          restricted:
+            typeof airRaw.restricted === "number" ? airRaw.restricted : 0,
+          names: Array.isArray(airRaw.names)
+            ? airRaw.names.filter((n): n is string => typeof n === "string")
+            : [],
+        }
+      : null;
+
+  if (!meteo && !parcelle && !urbanisme && !airspace) return null;
+  return { meteo, parcelle, urbanisme, airspace };
+}
+
 function buildAnswer(
   missionName: string,
   prompt: string,
   stats: MissionStats,
   maxBatteryMinutes: number,
   profile: MissionProfile,
+  terrain: TerrainSnapshot | null,
+  site: SiteSnapshot | null,
 ): string {
   if (stats.waypointCount === 0) {
     return `Je n’ai pas encore de trajectoire exploitable pour "${missionName}". Donnez-moi au moins un début de route ou appliquez un template, puis je pourrai résumer le plan de vol et signaler les points faibles.`;
@@ -416,6 +604,41 @@ function buildAnswer(
   const parts = [
     `Mission "${missionName}": ${stats.waypointCount} waypoints sur ${formatDistance(stats.totalDistanceM)} pour environ ${formatDuration(stats.estimatedFlightSeconds)} de vol estimé.`,
   ];
+
+  if (terrain && (terrain.coveragePct ?? 0) > 50) {
+    parts.push(
+      `Analyse chantier (MNT IGN ${terrain.source}): sol ${terrain.groundMinM !== null ? `${Math.round(terrain.groundMinM)} m` : "?"} à ${terrain.groundMaxM !== null ? `${Math.round(terrain.groundMaxM)} m` : "?"}, AGL ${terrain.aglMinM !== null ? `${Math.round(terrain.aglMinM)} m` : "?"} à ${terrain.aglMaxM !== null ? `${Math.round(terrain.aglMaxM)} m` : "?"}${terrain.reliefM !== null && terrain.reliefM > 30 ? ". Relief marqué : drapez le vol à AGL constant" : ". Vol compatible avec le relief"} .`,
+    );
+  }
+
+  if (site && (site.meteo || site.parcelle || site.airspace)) {
+    const bits: string[] = [];
+    if (site.meteo) {
+      bits.push(
+        `météo ${site.meteo.label} (vent ${site.meteo.windMs !== null ? `${site.meteo.windMs.toFixed(1)} m/s` : "?"}, pluie ${site.meteo.precipitationMm !== null ? `${site.meteo.precipitationMm.toFixed(1)} mm` : "?"})`,
+      );
+    }
+    if (site.parcelle?.commune) {
+      bits.push(
+        `parcelle ${site.parcelle.commune} section ${site.parcelle.section ?? "?"} n°${site.parcelle.numero ?? "?"}`,
+      );
+    }
+    if (site.urbanisme?.documentType || site.urbanisme?.zoneLibelle) {
+      bits.push(
+        `urbanisme ${site.urbanisme.documentType ?? "?"} zone ${site.urbanisme.zoneLibelle ?? "?"}${site.urbanisme.zoneLibelleLong ? ` (${site.urbanisme.zoneLibelleLong})` : ""}`,
+      );
+    }
+    if (site.airspace) {
+      bits.push(
+        site.airspace.prohibited > 0
+          ? `${site.airspace.prohibited} zone(s) interdite(s) — vol non autorisé`
+          : site.airspace.restricted > 0
+            ? `${site.airspace.restricted} zone(s) restreinte(s) — vérifiez NOTAM/hauteurs`
+            : "aucune restriction au centroïde",
+      );
+    }
+    if (bits.length > 0) parts.push(`Contexte site : ${bits.join(" ; ")}.`);
+  }
 
   if (profile === "facade") {
     parts.push(
@@ -458,6 +681,8 @@ assistantRoutes.post("/mission", async (req, res) => {
     waypoints: rawWaypoints,
     pois: rawPois,
     obstacles: rawObstacles,
+    terrain: rawTerrain,
+    site: rawSite,
   } = (req.body ?? {}) as MissionAssistantRequest;
 
   if (typeof prompt !== "string" || prompt.trim().length < 3) {
@@ -486,6 +711,8 @@ assistantRoutes.post("/mission", async (req, res) => {
   const stats = getMissionStats(waypoints, pois, obstacles, config);
   const focus = buildFocus(prompt);
   const profile = resolveMissionProfile(templateMode, focus);
+  const terrain = normalizeTerrainSnapshot(rawTerrain);
+  const site = normalizeSiteSnapshot(rawSite);
 
   const draftResponse = {
     answer: buildAnswer(
@@ -494,6 +721,8 @@ assistantRoutes.post("/mission", async (req, res) => {
       stats,
       maxBatteryMinutes,
       profile,
+      terrain,
+      site,
     ),
     bullets: [
       `${stats.waypointCount} waypoints, ${stats.poiCount} POI, ${stats.obstacleCount} obstacle${stats.obstacleCount > 1 ? "s" : ""}.`,
@@ -501,11 +730,15 @@ assistantRoutes.post("/mission", async (req, res) => {
       stats.altitudeMinM !== null && stats.altitudeMaxM !== null
         ? `Plage d’altitude: ${Math.round(stats.altitudeMinM)} m à ${Math.round(stats.altitudeMaxM)} m.${stats.averageGimbalPitchDeg !== null ? ` Gimbal moyen: ${Math.round(stats.averageGimbalPitchDeg)}°.` : ""}`
         : "Plage d’altitude indisponible.",
-      buildBestPracticeBullet(profile, stats),
+      terrain && (terrain.coveragePct ?? 0) > 0
+        ? `MNT IGN: sol ${terrain.groundMinM !== null ? `${Math.round(terrain.groundMinM)} m` : "?"} à ${terrain.groundMaxM !== null ? `${Math.round(terrain.groundMaxM)} m` : "?"} (${terrain.coveragePct}% couvert), AGL ${terrain.aglMinM !== null ? `${Math.round(terrain.aglMinM)} m` : "?"} à ${terrain.aglMaxM !== null ? `${Math.round(terrain.aglMaxM)} m` : "?"}.`
+        : buildBestPracticeBullet(profile, stats),
     ],
     warnings: [
       ...buildWarnings(stats, maxBatteryMinutes),
       ...buildProfileWarnings(stats, profile),
+      ...buildTerrainWarnings(terrain),
+      ...buildSiteWarnings(site),
     ],
     suggestedActions: buildSuggestedActions(
       stats,
@@ -538,12 +771,22 @@ assistantRoutes.post("/mission", async (req, res) => {
         },
         maxBatteryMinutes,
         draft: draftResponse,
+        terrain,
+        site,
       });
 
-    res.json(response);
+    res.json({ ...response, terrain, site });
   } catch (error) {
     if (error instanceof AssistantAiConfigError) {
-      res.status(503).json({ error: error.message });
+      // Repli 100% local : les règles déterministes (relief, météo, DGAC,
+      // autonomie) restent exploitables sans aucun provider IA configuré.
+      res.json({
+        ...draftResponse,
+        source: "local-rules",
+        usedModel: "regles-locales",
+        terrain,
+        site,
+      });
       return;
     }
 

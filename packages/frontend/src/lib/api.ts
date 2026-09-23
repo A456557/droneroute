@@ -139,8 +139,42 @@ export interface MissionAssistantResponse {
   bullets: string[];
   warnings: string[];
   suggestedActions: MissionAssistantSuggestedAction[];
-  source: "github-models" | "openai-compatible";
+  source: "github-models" | "openai-compatible" | "ollama" | "local-rules";
   usedModel: string | null;
+  terrain?: {
+    groundMinM: number | null;
+    groundMaxM: number | null;
+    reliefM: number | null;
+    aglMinM: number | null;
+    aglMaxM: number | null;
+    coveragePct: number | null;
+    source: string;
+  } | null;
+  site?: {
+    meteo: {
+      windMs: number | null;
+      gustsMs: number | null;
+      precipitationMm: number | null;
+      weatherCode: number | null;
+      label: string;
+    } | null;
+    parcelle: {
+      commune: string | null;
+      section: string | null;
+      numero: string | null;
+      contenanceM2: number | null;
+    } | null;
+    urbanisme: {
+      documentType: string | null;
+      zoneLibelle: string | null;
+      zoneLibelleLong: string | null;
+    } | null;
+    airspace: {
+      prohibited: number;
+      restricted: number;
+      names: string[];
+    } | null;
+  } | null;
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -249,6 +283,40 @@ export const missionAssistantApi = {
     waypoints: Waypoint[];
     pois: PointOfInterest[];
     obstacles: Obstacle[];
+    terrain?: {
+      groundMinM: number | null;
+      groundMaxM: number | null;
+      reliefM: number | null;
+      aglMinM: number | null;
+      aglMaxM: number | null;
+      coveragePct: number | null;
+      source: string;
+    } | null;
+    site?: {
+      meteo: {
+        windMs: number | null;
+        gustsMs: number | null;
+        precipitationMm: number | null;
+        weatherCode: number | null;
+        label: string;
+      } | null;
+      parcelle: {
+        commune: string | null;
+        section: string | null;
+        numero: string | null;
+        contenanceM2: number | null;
+      } | null;
+      urbanisme: {
+        documentType: string | null;
+        zoneLibelle: string | null;
+        zoneLibelleLong: string | null;
+      } | null;
+      airspace: {
+        prohibited: number;
+        restricted: number;
+        names: string[];
+      } | null;
+    } | null;
   }) => api.post<MissionAssistantResponse>("/assistant/mission", body),
 };
 

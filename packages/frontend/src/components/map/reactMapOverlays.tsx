@@ -236,8 +236,14 @@ export function RnbBuildingsLayer2D({
   );
 }
 
-// Activates 3D relief (terrain + pitched camera) on the open-source MapLibre
-// view when `active` is true. No API key required (AWS Terrarium tiles).
+// Active le relief 3D (terrain + caméra inclinée) sur la vue MapLibre
+// open-source quand `active` est vrai.
+// - Visualisation : tuiles Terrarium (MNT mondial, sans clé).
+// - Altitudes chantier précises (France) : MNT IGN RGE ALTI / LiDAR HD via
+//   le proxy backend /api/terrain (Géoplateforme, Licence Ouverte), utilisé
+//   pour le drapage AGL constant et l'analyse IA (voir lib/terrain.ts).
+//   Le MNT IGN WMTS n'est pas encodé Terrarium/Mapbox donc pas utilisable
+//   directement comme raster-dem MapLibre.
 export function MapLibre3DController({
   active,
   mapRef,

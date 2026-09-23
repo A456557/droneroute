@@ -11,6 +11,8 @@ import { sharedRoutes } from "./routes/shared.js";
 import { airspaceRoutes } from "./routes/airspace.js";
 import { assistantRoutes } from "./routes/assistant.js";
 import { buildingRoutes } from "./routes/buildings.js";
+import { terrainRoutes } from "./routes/terrain.js";
+import { siteRoutes } from "./routes/site.js";
 import { adminRoutes } from "./routes/admin.js";
 import { preferencesRoutes } from "./routes/preferences.js";
 import { globalLimiter } from "./middleware/rateLimit.js";
@@ -67,6 +69,8 @@ app.use("/api/preferences", preferencesRoutes);
 app.use("/api/airspace", airspaceRoutes);
 app.use("/api/assistant", assistantRoutes);
 app.use("/api/buildings", buildingRoutes);
+app.use("/api/terrain", terrainRoutes);
+app.use("/api/site", siteRoutes);
 app.use("/api", sharedRoutes);
 
 // Health check

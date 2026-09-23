@@ -2,10 +2,12 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { missionAssistantApi, type MissionAssistantResponse } from "@/lib/api";
+import { buildTerrainSnapshot, terrainApi } from "@/lib/terrain";
+import { buildSiteSnapshot, siteApi, type SiteSummary } from "@/lib/site";
 import { useMissionStore } from "@/store/missionStore";
 
 const SUGGESTED_PROMPTS = [
-  "Analyse cette mission et propose 3 améliorations.",
+  "Analyse cette mission et vérifie que le trajet est adapté au terrain.",
   "Est-ce que cette mission tient sur une batterie ?",
   "Que faut-il ajuster pour un scan facade plus propre ?",
   "Pour une cartographie 3D de bâtiments, faut-il une cross-grid ?",
@@ -17,6 +19,7 @@ export function MissionAssistantPanel() {
   const [prompt, setPrompt] = useState(SUGGESTED_PROMPTS[0]);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<MissionAssistantResponse | null>(null);
+  const [siteSummary, setSiteSummary] = useState<SiteSummary | null>(null);
 
   const analyzeMission = async () => {
     const trimmedPrompt = prompt.trim();
@@ -27,6 +30,33 @@ export function MissionAssistantPanel() {
 
     setLoading(true);
     try {
+      // Analyse chantier : profil MNT IGN (RGE ALTI) + contexte site
+      // (météo Open-Meteo, parcelle APICarto, PLU GPU, zones DGAC).
+      let terrain = null;
+      let site = null;
+      if (waypoints.length > 0) {
+        const points = waypoints.map((wp) => ({
+          lat: wp.latitude,
+          lon: wp.longitude,
+        }));
+        try {
+          const profile = await terrainApi.profile(points);
+          terrain = buildTerrainSnapshot(
+            waypoints,
+            profile.samples,
+            profile.source,
+          );
+        } catch {
+          terrain = null;
+        }
+        try {
+          const summary = await siteApi.summary(points);
+          setSiteSummary(summary);
+          site = buildSiteSnapshot(summary);
+        } catch {
+          site = null;
+        }
+      }
       const response = await missionAssistantApi.analyzeMission({
         prompt: trimmedPrompt,
         missionName,
@@ -35,6 +65,8 @@ export function MissionAssistantPanel() {
         waypoints,
         pois,
         obstacles,
+        terrain,
+        site,
       });
       setResult(response);
     } catch (error) {
@@ -53,10 +85,11 @@ export function MissionAssistantPanel() {
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">Mission assistant</p>
         <p className="text-muted-foreground leading-relaxed">
-          Assistant serveur branché sur la mission en cours. Il résume la
-          trajectoire, signale les points faibles et propose les prochains
-          ajustements, avec les règles Mission Planner injectées comme contexte
-          de mission.
+          Assistant serveur branché sur la mission en cours + MNT IGN (RGE
+          ALTI), météo Open-Meteo, parcelle APICarto, PLU (GPU) et zones DGAC —
+          le tout en open-source (Licence Ouverte). Il vérifie que le trajet
+          drone est adapté au chantier via un modèle open-source (Ollama +
+          Mistral en local).
         </p>
       </div>
 
@@ -101,6 +134,41 @@ export function MissionAssistantPanel() {
 
       {result && (
         <div className="space-y-3 rounded-md border border-border bg-black/10 p-3">
+          {siteSummary && (
+            <div className="flex flex-wrap gap-1.5 text-[11px]">
+              {siteSummary.meteo && (
+                <span className="rounded border border-border/70 px-2 py-0.5">
+                  🌬️ {siteSummary.meteo.label}, vent{" "}
+                  {siteSummary.meteo.windMs?.toFixed(1) ?? "?"} m/s
+                  {siteSummary.meteo.precipitationMm != null &&
+                    siteSummary.meteo.precipitationMm > 0 &&
+                    `, pluie ${siteSummary.meteo.precipitationMm.toFixed(1)} mm`}
+                </span>
+              )}
+              {siteSummary.parcelle?.commune && (
+                <span className="rounded border border-border/70 px-2 py-0.5">
+                  🏗️ {siteSummary.parcelle.commune} §
+                  {siteSummary.parcelle.section ?? "?"} n°
+                  {siteSummary.parcelle.numero ?? "?"}
+                </span>
+              )}
+              {(siteSummary.urbanisme?.documentType ||
+                siteSummary.urbanisme?.zoneLibelle) && (
+                <span className="rounded border border-border/70 px-2 py-0.5">
+                  📋 {siteSummary.urbanisme.documentType ?? "Urba"} · zone{" "}
+                  {siteSummary.urbanisme.zoneLibelle ?? "?"}
+                </span>
+              )}
+              {siteSummary.airspace &&
+                (siteSummary.airspace.prohibited > 0 ||
+                  siteSummary.airspace.restricted > 0) && (
+                  <span className="rounded border border-amber-500/50 px-2 py-0.5 text-amber-300">
+                    ⚠️ DGAC : {siteSummary.airspace.prohibited} interdite(s),{" "}
+                    {siteSummary.airspace.restricted} restreinte(s)
+                  </span>
+                )}
+            </div>
+          )}
           <div className="space-y-1">
             <div className="flex items-center justify-between gap-3">
               <p className="text-sm font-medium text-foreground">Réponse</p>

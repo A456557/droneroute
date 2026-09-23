@@ -277,6 +277,45 @@ type BuildingDetectionCacheEntry = {
 const MIN_PENCIL_PATH_LENGTH_M = 10;
 const ROADMAP_TYPE = "roadmap";
 const HYBRID_TYPE = "hybrid";
+// Fonds 100% open-source (Licence Ouverte 2.0, sans clé) :
+// - Plan IGN v2 (Géoplateforme WMTS) pour la vue "street"
+// - BD ORTHO 20 cm (Géoplateforme WMTS) pour la vue "satellite"
+// Docs : https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetCapabilities
+// Module-level pour garder une identité de style stable entre les renders
+// (un objet inline forcerait react-map-gl à recharger tout le style à
+// chaque render, avec un flash noir pendant le rechargement des tuiles).
+const IGN_ATTRIBUTION =
+  "© IGN – Géoplateforme | Licence Ouverte 2.0 | © OpenStreetMap contributors";
+const IGN_PLAN_STYLE = {
+  version: 8,
+  sources: {
+    "plan-ign": {
+      type: "raster",
+      tiles: [
+        "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/png",
+      ],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: IGN_ATTRIBUTION,
+    },
+  },
+  layers: [{ id: "plan-ign-raster", type: "raster", source: "plan-ign" }],
+} as any;
+const IGN_ORTHO_STYLE = {
+  version: 8,
+  sources: {
+    "bd-ortho": {
+      type: "raster",
+      tiles: [
+        "https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=GetTile&LAYER=ORTHOIMAGERY.ORTHOPHOTOS&STYLE=normal&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/jpeg",
+      ],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: IGN_ATTRIBUTION,
+    },
+  },
+  layers: [{ id: "bd-ortho-raster", type: "raster", source: "bd-ortho" }],
+} as any;
 const RECONSTRUCTION_DEMO_QUERY = "facade-reconstruction";
 const BUILDING_DETECTION_CACHE_KEY = "droneroute-building-detection-cache-v1";
 const BUILDING_DETECTION_CACHE_MAX_ENTRIES = 12;
@@ -3687,33 +3726,11 @@ export function MapView() {
     })();
   };
 
-  // Open-source basemaps for the MapLibre view (no API key required):
-  // - Street: OpenFreeMap "bright" vector style (roads + building footprints)
-  // - Satellite: Esri World Imagery raster tiles
-  const OPENFREEMAP_BRIGHT_STYLE =
-    "https://tiles.openfreemap.org/styles/bright";
-  const esriImageryStyle = {
-    version: 8,
-    sources: {
-      esri: {
-        type: "raster",
-        tiles: [
-          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        ],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution:
-          "Esri, Maxar, Earthstar Geographics | © OpenStreetMap contributors",
-      },
-    },
-    layers: [
-      {
-        id: "esri-imagery",
-        type: "raster",
-        source: "esri",
-      },
-    ],
-  } as any;
+  // Fonds 100% Licence Ouverte (sans clé) :
+  // - Street : Plan IGN v2 WMTS (précis France, MAJ continue BD TOPO)
+  // - Satellite/Hybrid : BD ORTHO WMTS 20 cm (France vue du ciel)
+  // Les styles IGN_*_STYLE (module-level) gardent une identité stable entre
+  // les renders (voir ci-dessus).
 
   // Open-source 3D mode: same map, pitched camera + terrain relief (see
   // MapLibre3DController) + extruded buildings below.
@@ -3731,11 +3748,7 @@ export function MapView() {
         // maplibre-gl v4 lacks GlobeControl required by react-map-gl v8
         // types (v5-only API); the runtime APIs we use are identical.
         mapLib={maplibregl as any}
-        mapStyle={
-          mapTypeId === HYBRID_TYPE
-            ? esriImageryStyle
-            : OPENFREEMAP_BRIGHT_STYLE
-        }
+        mapStyle={mapTypeId === HYBRID_TYPE ? IGN_ORTHO_STYLE : IGN_PLAN_STYLE}
         style={{ width: "100%", height: "100%" }}
       >
         <Source id="route" type="geojson" data={routeGeo}>
