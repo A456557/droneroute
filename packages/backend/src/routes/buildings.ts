@@ -699,18 +699,37 @@ async function fetchRnbBuildingsForBbox(
   east: number,
   north: number,
 ): Promise<RnbBuildingResponse[]> {
-  const url = new URL("https://rnb-api.beta.gouv.fr/api/alpha/buildings");
-  url.searchParams.set("bbox", `${west},${south},${east},${north}`);
+  // Le RNB pagine par curseur (20 resultats/page par defaut). Sans suivre
+  // les pages, les batiments au-dela de la premiere page sont invisibles :
+  // un clic dessus selectionnait alors un voisin (ou rien). On suit les
+  // pages jusqu'a epuisement (plafond de securite : ~600 batiments).
+  const MAX_PAGES = 30;
+  const all: RnbApiBuilding[] = [];
+  let nextUrl: string | null =
+    `https://rnb-api.beta.gouv.fr/api/alpha/buildings?bbox=${west},${south},${east},${north}`;
 
-  const response = await fetch(url.toString());
-  if (!response.ok) {
-    throw new Error(`RNB request failed with status ${response.status}`);
+  for (let page = 0; page < MAX_PAGES && nextUrl; page += 1) {
+    const response = await fetch(nextUrl, {
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      throw new Error(`RNB request failed with status ${response.status}`);
+    }
+
+    const payload = (await response.json()) as {
+      results?: RnbApiBuilding[];
+      next?: string | null;
+    };
+    if (Array.isArray(payload.results)) {
+      all.push(...payload.results);
+    }
+    nextUrl =
+      typeof payload.next === "string" && payload.next.length > 0
+        ? payload.next
+        : null;
   }
 
-  const payload = (await response.json()) as { results?: RnbApiBuilding[] };
-  const results = Array.isArray(payload.results) ? payload.results : [];
-
-  return results
+  return all
     .map(normalizeRnbBuilding)
     .filter((building): building is RnbBuildingResponse => building !== null);
 }
@@ -855,7 +874,19 @@ buildingRoutes.get("/rnb", async (req, res) => {
 
   try {
     const buildings = await fetchRnbBuildingsForBbox(west, south, east, north);
-    res.json({ buildings: buildings.slice(0, 120) });
+    // Tri par proximite au centre de l'emprise : si un plafond s'applique,
+    // ce sont les batiments visibles/cliquables au centre qui survivent
+    // (et non un sous-ensemble arbitraire de la pagination RNB).
+    const centerLat = (south + north) / 2;
+    const centerLng = (west + east) / 2;
+    const sorted = [...buildings].sort((a, b) => {
+      const da =
+        (a.centroid.lat - centerLat) ** 2 + (a.centroid.lng - centerLng) ** 2;
+      const db =
+        (b.centroid.lat - centerLat) ** 2 + (b.centroid.lng - centerLng) ** 2;
+      return da - db;
+    });
+    res.json({ buildings: sorted.slice(0, 1000) });
   } catch (error) {
     console.error("RNB layer error:", error);
     res.status(502).json({ error: "Failed to load RNB buildings" });
