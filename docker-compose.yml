@@ -48,7 +48,7 @@ services:
       # IA locale open-source (Ollama + Mistral) : décommentez pour activer.
       # Voir https://ollama.com — puis : ollama pull mistral
       # - AI_PROVIDER=ollama
-      # - AI_API_URL=http://ollama:11434/v1/chat/completions
+      # - AI_API_URL=http://ollama:11434/api/chat
       # - AI_MODEL=mistral:latest
     # Service IA locale (optionnel, profil ollama) :
     #   docker compose --profile ollama up -d

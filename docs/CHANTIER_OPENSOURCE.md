@@ -58,10 +58,12 @@ Capabilities : `https://data.geopf.fr/wmts?SERVICE=WMTS&VERSION=1.0.0&REQUEST=Ge
 
 ## Analyse IA — vérifie que le trajet est adapté au terrain
 
-- Moteur **100% open-source local** : **Ollama + Mistral** (`AI_PROVIDER=ollama`,
-  `AI_API_URL=http://localhost:11434/v1/chat/completions` ou `http://ollama:…` en Docker,
+- Moteur **100% open-source local** : **Ollama + Mistral/Qwen** (`AI_PROVIDER=ollama`,
+  `AI_API_URL=http://localhost:11434/api/chat` ou `http://ollama:11434/api/chat` en Docker,
   `AI_MODEL=mistral:latest`). Lancement : `ollama serve && ollama pull mistral`.
-  Le backend parle OpenAI-compatible, donc Llama 3.1 / Qwen 2.5 / Codestral marchent aussi.
+  Le backend utilise le protocole natif `/api/chat` (`think:false` + `format:json`,
+  requis par les modèles "thinking" type qwen3) ; un endpoint OpenAI-compatible
+  (`/v1/chat/completions`) reste supporté si `AI_API_URL` le mentionne.
 - Règles déterministes (sans LLM) conservées : AGL min < 15 m, relief > 30 m
   → drapage requis, MNT partiel, autonomie, segments longs, gimbal façade/grid-3D.
 - Fichiers : `services/assistantAi.ts` (provider `ollama`), `routes/assistant.ts`

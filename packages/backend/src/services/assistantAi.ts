@@ -100,8 +100,11 @@ const GITHUB_MODELS_DEFAULT_MODEL = "openai/gpt-4.1";
 const OPENAI_COMPATIBLE_DEFAULT_ENDPOINT =
   "https://api.openai.com/v1/chat/completions";
 // Ollama local (modèles open-source : mistral, llama3.1, qwen2.5...).
-// En Docker, utiliser http://ollama:11434/v1/chat/completions.
-const OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434/v1/chat/completions";
+// Protocole natif /api/chat (recommandé) : permet think:false + format:json,
+// indispensable avec les modèles "thinking" (qwen3...) qui raisonnent sinon
+// dans un champ séparé et renvoient un content vide.
+// En Docker, utiliser http://ollama:11434/api/chat.
+const OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434/api/chat";
 const OLLAMA_DEFAULT_MODEL = "mistral:latest";
 
 function trimStringArray(
@@ -284,6 +287,16 @@ async function requestChatCompletion(
   config: ProviderConfig,
   body: Record<string, unknown>,
 ): Promise<unknown> {
+  // Protocole natif Ollama (/api/chat) : think:false + format json.
+  // L'endpoint OpenAI-compatible (/v1/chat/completions) reste supporté
+  // si AI_API_URL le mentionne explicitement.
+  if (
+    config.provider === "ollama" &&
+    !config.endpoint.includes("/v1/chat/completions")
+  ) {
+    return requestOllamaNative(config, body);
+  }
+
   const headers: Record<string, string> = {
     Authorization: `Bearer ${config.token}`,
     "Content-Type": "application/json",
@@ -309,6 +322,67 @@ async function requestChatCompletion(
 
   const payload = await response.json();
   const content = payload?.choices?.[0]?.message?.content;
+
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("Mission assistant provider returned an empty response.");
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    throw new Error("Mission assistant provider returned invalid JSON.");
+  }
+}
+
+/**
+ * Appel natif Ollama (POST /api/chat) : désactive le raisonnement
+ * intermédiaire (think:false) et force une sortie JSON (format:"json").
+ * Les rôles "developer" (inconnus d'Ollama) sont fusionnés en "system".
+ */
+async function requestOllamaNative(
+  config: ProviderConfig,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const messages = Array.isArray(body.messages)
+    ? (body.messages as { role?: unknown; content?: unknown }[]).map((m) => ({
+        role: m.role === "developer" ? "system" : m.role,
+        content: m.content,
+      }))
+    : [];
+
+  const response = await fetch(config.endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: config.model,
+      messages,
+      stream: false,
+      think: false,
+      format: "json",
+      options: {
+        temperature:
+          typeof body.temperature === "number" ? body.temperature : 0.2,
+        num_predict:
+          typeof body.max_tokens === "number" ? body.max_tokens : 700,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Mission assistant provider error (${response.status}): ${errorText || response.statusText}`,
+    );
+  }
+
+  const payload = (await response.json()) as {
+    message?: { content?: unknown };
+    error?: unknown;
+  };
+  if (typeof payload.error === "string" && payload.error) {
+    throw new Error(`Mission assistant provider error: ${payload.error}`);
+  }
+  const content = payload?.message?.content;
 
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("Mission assistant provider returned an empty response.");
