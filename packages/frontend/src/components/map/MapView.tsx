@@ -572,13 +572,27 @@ function generateBuildingReconstructionMission(args: {
   return mission;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+function RnbInfoSection({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mt-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+      {children}
+    </div>
+  );
+}
+
+function RnbInfoRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 py-px">
+      <dt className="shrink-0 text-muted-foreground">{label}</dt>
+      <dd className="text-right font-medium">{children}</dd>
+    </div>
+  );
 }
 
 function buildRnbInfoWindowContent(args: {
@@ -595,123 +609,214 @@ function buildRnbInfoWindowContent(args: {
     approximateBuildingShell,
     loading,
   } = args;
-  const rnbStatus = building.status ?? "unknown";
-  const bdTopoHeight =
-    bdTopoBuilding?.heightM != null
-      ? `${Math.round(bdTopoBuilding.heightM)} m`
-      : "n/a";
-  const bdTopoFloors =
-    bdTopoBuilding?.floorCount != null
-      ? String(Math.round(bdTopoBuilding.floorCount))
-      : "n/a";
+  // Toutes les mesures sont conservées : hauteur, périmètre, longueur max,
+  // largeur max, surface et longueurs de chaque segment de façade.
+  const footprint = bdTopoBuilding?.footprint ?? building.footprint;
+  const footprintSource = bdTopoBuilding ? "BD TOPO" : "RNB";
+  const footprintMetrics = footprintMetricsSummary(footprint);
+  const segments = footprintSegmentLengths(footprint);
+  const vertexCount = normalizeFootprint(footprint).length;
+  const centroid =
+    bdTopoBuilding?.centroid ?? building.centroid ?? building.point;
   const usageLine = [bdTopoBuilding?.usage1, bdTopoBuilding?.usage2]
     .filter(
       (value): value is string => typeof value === "string" && value.length > 0,
     )
     .join(" / ");
-  const footprintForSegments = bdTopoBuilding?.footprint ?? building.footprint;
-  const footprintMetrics = footprintMetricsSummary(footprintForSegments);
-  const segmentLengthsHtml =
-    buildFootprintSegmentLengthsHtml(footprintForSegments);
-  const segmentRows = segmentLengthsHtml
-    .split("</div>")
-    .filter((row) => row.trim().length > 0)
-    .map((row, index) => (
-      <div key={`segment-row-${index}`}>{row.replace(/<[^>]+>/g, "")}</div>
-    ));
 
   return (
-    <div className="min-w-[220px] max-w-[300px] bg-white text-[12px] leading-[1.45] text-black">
-      <div className="font-bold text-black">Bâtiment RNB</div>
-      <div className="mt-2 font-bold text-black">Dimensions</div>
-      <div>
-        <strong>Hauteur:</strong> {bdTopoHeight}
+    <div className="min-w-[220px] max-w-[300px] text-[12px] leading-[1.45] text-foreground">
+      <div className="break-all font-mono text-[11px]">{building.rnbId}</div>
+      <div className="mt-1 flex flex-wrap items-center gap-1">
+        <span
+          className={`rounded-full border px-2 py-px text-[10px] font-medium ${building.isActive ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "border-border bg-muted text-muted-foreground"}`}
+        >
+          {building.isActive ? "Actif" : "Inactif"}
+        </span>
+        {building.status ? (
+          <span className="rounded-full border border-border bg-muted px-2 py-px text-[10px] text-muted-foreground">
+            {building.status}
+          </span>
+        ) : null}
+        {loading ? (
+          <span className="text-[10px] text-muted-foreground">
+            Chargement BD TOPO…
+          </span>
+        ) : null}
       </div>
-      <div>
-        <strong>Périmètre:</strong> {footprintMetrics.perimeterLabel}
-      </div>
-      <div>
-        <strong>Longueur max:</strong> {footprintMetrics.lengthLabel}
-      </div>
-      <div>
-        <strong>Largeur max:</strong> {footprintMetrics.widthLabel}
-      </div>
-      <div>
-        <strong>Surface approx.:</strong> {footprintMetrics.areaLabel}
-      </div>
-      {segmentRows.length > 0 ? (
+      {loading ? (
+        <div className="mt-2 flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 px-2.5 py-2">
+          <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+          <span className="text-[11px] font-medium">
+            Chargement des données BD TOPO…
+          </span>
+        </div>
+      ) : null}
+
+      <RnbInfoSection>Mesures</RnbInfoSection>
+      <dl>
+        <RnbInfoRow label="Hauteur">
+          {bdTopoBuilding?.heightM != null
+            ? `${Math.round(bdTopoBuilding.heightM)} m`
+            : "—"}
+        </RnbInfoRow>
+        <RnbInfoRow label="Périmètre">
+          {footprintMetrics.perimeterLabel}
+        </RnbInfoRow>
+        <RnbInfoRow label="Longueur max">
+          {footprintMetrics.lengthLabel}
+        </RnbInfoRow>
+        <RnbInfoRow label="Largeur max">
+          {footprintMetrics.widthLabel}
+        </RnbInfoRow>
+        <RnbInfoRow label="Surface">{footprintMetrics.areaLabel}</RnbInfoRow>
+        <RnbInfoRow label="Sommets">
+          {vertexCount > 0 ? vertexCount : "—"}
+        </RnbInfoRow>
+        <RnbInfoRow label="Emprise">{footprintSource}</RnbInfoRow>
+      </dl>
+
+      {segments.length > 0 ? (
         <>
-          <div className="mt-2 font-bold text-black">Segments du polygone</div>
-          {segmentRows}
+          <RnbInfoSection>Façades · {segments.length} segments</RnbInfoSection>
+          <div className="mt-1 grid max-h-28 grid-cols-2 gap-1 overflow-y-auto">
+            {segments.map((segment) => (
+              <div
+                key={`segment-${segment.index}`}
+                className="rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[11px]"
+              >
+                S{segment.index} · {segment.lengthM.toFixed(1)} m
+              </div>
+            ))}
+          </div>
         </>
       ) : null}
-      <div className="mt-2 font-bold text-black">RNB</div>
-      <div>
-        <strong>RNB:</strong> {building.rnbId}
-      </div>
-      <div>
-        <strong>Statut:</strong> {rnbStatus}
-      </div>
-      <div>
-        <strong>Adresses liées:</strong> {building.addressCount}
-      </div>
-      <div>
-        <strong>Actif:</strong> {building.isActive ? "oui" : "non"}
-      </div>
-      <div className="mt-2 font-bold text-black">BD TOPO</div>
-      {loading ? <div className="text-black">Chargement BD TOPO…</div> : null}
-      <div>
-        <strong>Cleabs:</strong>{" "}
-        {bdTopoBuilding?.cleabs ?? building.bdTopoId ?? "n/a"}
-      </div>
-      <div>
-        <strong>Nature:</strong> {bdTopoBuilding?.nature ?? "n/a"}
-      </div>
-      <div>
-        <strong>Usage:</strong> {usageLine || "n/a"}
-      </div>
-      <div>
-        <strong>Étages:</strong> {bdTopoFloors}
-      </div>
-      <div>
-        <strong>Origine:</strong> {bdTopoBuilding?.origin ?? "n/a"}
-      </div>
-      {threeDMarkers.length > 0 ? (
-        <>
-          <div className="mt-2 font-bold text-black">3D mission markers</div>
-          {threeDMarkers.map((marker) => (
-            <div key={marker.id}>
-              <strong>{marker.glyph}:</strong> {marker.label}
+
+      <RnbInfoSection>Référentiels</RnbInfoSection>
+      <dl>
+        <RnbInfoRow label="Adresses liées">{building.addressCount}</RnbInfoRow>
+        {building.extIds.length > 0 ? (
+          <RnbInfoRow label="Id externes">{building.extIds.length}</RnbInfoRow>
+        ) : null}
+      </dl>
+      {building.extIds.length > 0 ? (
+        <div className="mt-1 space-y-px">
+          {building.extIds.slice(0, 4).map((extId) => (
+            <div
+              key={`${extId.source}-${extId.id}`}
+              className="truncate font-mono text-[11px] text-muted-foreground"
+              title={`${extId.source} : ${extId.id}`}
+            >
+              {extId.source} · {extId.id}
             </div>
           ))}
+          {building.extIds.length > 4 ? (
+            <div className="text-[11px] text-muted-foreground">
+              +{building.extIds.length - 4} autres
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <RnbInfoSection>BD TOPO</RnbInfoSection>
+      {bdTopoBuilding ? (
+        <dl>
+          <RnbInfoRow label="Cleabs">
+            <span className="break-all font-mono text-[11px]">
+              {bdTopoBuilding.cleabs}
+            </span>
+          </RnbInfoRow>
+          <RnbInfoRow label="Nature">{bdTopoBuilding.nature ?? "—"}</RnbInfoRow>
+          <RnbInfoRow label="Usage">{usageLine || "—"}</RnbInfoRow>
+          <RnbInfoRow label="Étages">
+            {bdTopoBuilding.floorCount != null
+              ? Math.round(bdTopoBuilding.floorCount)
+              : "—"}
+          </RnbInfoRow>
+          <RnbInfoRow label="Statut">{bdTopoBuilding.status ?? "—"}</RnbInfoRow>
+          <RnbInfoRow label="Origine">
+            {bdTopoBuilding.origin ?? "—"}
+          </RnbInfoRow>
+          {bdTopoBuilding.sourceMethodPlanimetric ? (
+            <RnbInfoRow label="Précision plani">
+              {bdTopoBuilding.sourceMethodPlanimetric}
+            </RnbInfoRow>
+          ) : null}
+          {bdTopoBuilding.sourceMethodAltimetric ? (
+            <RnbInfoRow label="Précision alti">
+              {bdTopoBuilding.sourceMethodAltimetric}
+            </RnbInfoRow>
+          ) : null}
+        </dl>
+      ) : loading ? (
+        <div className="animate-pulse space-y-1.5" aria-hidden="true">
+          <div className="h-3 rounded bg-muted" />
+          <div className="h-3 w-5/6 rounded bg-muted" />
+          <div className="h-3 w-4/6 rounded bg-muted" />
+          <div className="h-3 w-3/6 rounded bg-muted" />
+        </div>
+      ) : (
+        <div className="text-muted-foreground">Aucun appariement BD TOPO</div>
+      )}
+
+      {centroid &&
+      Number.isFinite(centroid.lat) &&
+      Number.isFinite(centroid.lng) ? (
+        <>
+          <RnbInfoSection>Position</RnbInfoSection>
+          <dl>
+            <RnbInfoRow label="Centroïde">
+              <span className="font-mono text-[11px]">
+                {centroid.lat.toFixed(5)}, {centroid.lng.toFixed(5)}
+              </span>
+            </RnbInfoRow>
+          </dl>
         </>
       ) : null}
+
       {approximateBuildingShell ? (
         <>
-          <div className="mt-2 font-bold text-black">
-            Hybrid 3D building estimate
+          <RnbInfoSection>Estimation 3D (heuristique)</RnbInfoSection>
+          <div>{approximateBuildingShell.roofStyleLabel}</div>
+          <dl>
+            <RnbInfoRow label="Hauteur est.">
+              {Math.round(approximateBuildingShell.estimatedHeightM)} m
+            </RnbInfoRow>
+            <RnbInfoRow label="Murs">
+              {Math.round(approximateBuildingShell.wallHeightM)} m
+            </RnbInfoRow>
+            <RnbInfoRow label="Faîtage">
+              {Math.round(approximateBuildingShell.roofPeakHeightM)} m
+            </RnbInfoRow>
+            <RnbInfoRow label="Fiabilité">
+              {approximateBuildingShell.confidencePercent} %
+            </RnbInfoRow>
+          </dl>
+          <div className="mt-1 text-[11px] text-muted-foreground">
+            Source : {approximateBuildingShell.heightSourceLabel}
           </div>
-          <div>
-            {approximateBuildingShell.roofStyleLabel} at about{" "}
-            {Math.round(approximateBuildingShell.estimatedHeightM)}m.
-          </div>
-          <div className="text-black">
-            {approximateBuildingShell.heightSourceLabel} /{" "}
-            {approximateBuildingShell.streetViewLabel}
-          </div>
-          <div>
-            <strong>Credibility:</strong>{" "}
-            {approximateBuildingShell.confidencePercent}%
-          </div>
+        </>
+      ) : null}
+
+      {threeDMarkers.length > 0 ? (
+        <>
+          <RnbInfoSection>Repères mission 3D</RnbInfoSection>
+          {threeDMarkers.map((marker) => (
+            <div key={marker.id}>
+              <strong>{marker.glyph} :</strong> {marker.label}
+            </div>
+          ))}
         </>
       ) : null}
     </div>
   );
 }
 
-function buildFootprintSegmentLengthsHtml(footprint: LatLng[]): string {
+function footprintSegmentLengths(
+  footprint: LatLng[],
+): { index: number; lengthM: number }[] {
   if (footprint.length < 2) {
-    return "";
+    return [];
   }
 
   const hasClosingPoint =
@@ -723,20 +828,20 @@ function buildFootprintSegmentLengthsHtml(footprint: LatLng[]): string {
     : footprint.length;
 
   if (segmentCount < 2) {
-    return "";
+    return [];
   }
 
-  const rows: string[] = [];
+  const lengths: { index: number; lengthM: number }[] = [];
   for (let index = 0; index < segmentCount; index += 1) {
     const start = footprint[index];
     const end = footprint[(index + 1) % segmentCount];
-    const lengthM = haversine(start.lat, start.lng, end.lat, end.lng);
-    rows.push(
-      `<div><strong>S${index + 1}:</strong> ${escapeHtml(lengthM.toFixed(1))} m</div>`,
-    );
+    lengths.push({
+      index: index + 1,
+      lengthM: haversine(start.lat, start.lng, end.lat, end.lng),
+    });
   }
 
-  return rows.join("");
+  return lengths;
 }
 
 function footprintMetricsSummary(footprint: LatLng[]): {
@@ -1606,11 +1711,37 @@ function buildApproximateBuildingShell(
     11,
     48,
   );
-  const estimatedHeightM = clamp(
-    building.estimatedHeightM ?? heuristicHeightM,
-    12,
-    120,
-  );
+  // Fiabilité : la hauteur mesurée (BD TOPO) prime toujours et n'est plus
+  // écrasée par le plancher de 12 m (une maison de 7 m affichait 12 m).
+  // Sans hauteur, les étages (× ~3 m) sont plus fiables que l'heuristique
+  // de surface ; l'heuristique reste le dernier recours.
+  const rawMeasuredHeightM = building.estimatedHeightM;
+  const measuredHeightM =
+    typeof rawMeasuredHeightM === "number" &&
+    Number.isFinite(rawMeasuredHeightM) &&
+    rawMeasuredHeightM > 0
+      ? rawMeasuredHeightM
+      : null;
+  const rawLevels = building.levels;
+  const levelsHeightM =
+    measuredHeightM == null &&
+    typeof rawLevels === "number" &&
+    Number.isFinite(rawLevels) &&
+    rawLevels > 0
+      ? rawLevels * 3
+      : null;
+  const heightProvenance: "measured" | "levels" | "heuristic" =
+    measuredHeightM != null
+      ? "measured"
+      : levelsHeightM != null
+        ? "levels"
+        : "heuristic";
+  const estimatedHeightM =
+    heightProvenance === "measured"
+      ? clamp(measuredHeightM as number, 1, 120)
+      : heightProvenance === "levels"
+        ? clamp(levelsHeightM as number, 2, 120)
+        : clamp(heuristicHeightM, 11, 48);
   const explicitRoofShape = building.roofShape?.trim().toLowerCase() ?? null;
 
   let roofStyle = explicitRoofShape;
@@ -1660,10 +1791,12 @@ function buildApproximateBuildingShell(
                   ? 0.11
                   : 0.1) +
               (streetViewContext?.status === "available" ? 0.8 : 0),
-          1.8,
+          // Plancher proportionnel (et non 1,8 m fixe) pour ne pas gonfler
+          // la toiture des petits bâtiments.
+          Math.min(1, estimatedHeightM * 0.14),
           Math.min(estimatedHeightM * 0.28, 12),
         );
-  const wallHeightM = clamp(estimatedHeightM - roofRiseM, 8, estimatedHeightM);
+  const wallHeightM = clamp(estimatedHeightM - roofRiseM, 1, estimatedHeightM);
 
   const roofCoordinates = normalizedFootprint.map((point, index) => {
     const projected = projectedPoints[index];
@@ -1716,33 +1849,48 @@ function buildApproximateBuildingShell(
         })();
 
   const baseConfidence = clamp(building.confidence, 0, 1);
+  // Confiance calée sur la vraie provenance (mesurée > étages > heuristique)
+  // plutôt que sur l'ancien libellé "osm-height" hérité.
   const heightConfidence =
-    building.heightSource === "osm-height"
+    heightProvenance === "measured"
       ? 0.96
-      : building.heightSource === "osm-levels"
-        ? 0.82
+      : heightProvenance === "levels"
+        ? 0.8
         : 0.6;
-  const streetViewConfidence =
-    streetViewContext?.status === "available"
-      ? clamp(1 - (streetViewContext.distanceM ?? 75) / 70, 0.35, 1)
-      : streetViewContext?.status === "unknown"
-        ? 0.45
-        : 0.25;
   const roofConfidence = building.roofShape ? 0.9 : 0.55;
-  const confidencePercent = Math.round(
-    clamp(
-      baseConfidence * 0.55 +
-        heightConfidence * 0.25 +
-        streetViewConfidence * 0.1 +
-        roofConfidence * 0.1,
-      0.42,
-      0.97,
-    ) * 100,
-  );
-  const resolvedHeightSourceLabel = heightSourceLabel(
-    building,
-    heuristicHeightM,
-  );
+  // Le contexte visuel n'est pas branché (null en dur à l'appel) : on
+  // l'exclut du score au lieu de le pénaliser avec 0,25 fixe.
+  const confidencePercent = streetViewContext
+    ? Math.round(
+        clamp(
+          baseConfidence * 0.55 +
+            heightConfidence * 0.25 +
+            (streetViewContext.status === "available"
+              ? clamp(1 - (streetViewContext.distanceM ?? 75) / 70, 0.35, 1)
+              : streetViewContext.status === "unknown"
+                ? 0.45
+                : 0.25) *
+              0.1 +
+            roofConfidence * 0.1,
+          0.42,
+          0.97,
+        ) * 100,
+      )
+    : Math.round(
+        clamp(
+          baseConfidence * 0.61 +
+            heightConfidence * 0.28 +
+            roofConfidence * 0.11,
+          0.42,
+          0.97,
+        ) * 100,
+      );
+  const resolvedHeightSourceLabel =
+    heightProvenance === "measured"
+      ? "Hauteur BD TOPO"
+      : heightProvenance === "levels"
+        ? "Étages BD TOPO (× ~3 m)"
+        : heightSourceLabel(building, heuristicHeightM);
   const roofStyleLabel = formatRoofStyleLabel(roofStyle);
   const streetViewLabel =
     streetViewContext?.label ?? "Visual context cue pending";
@@ -2058,7 +2206,7 @@ function MapViewChrome({
           className={`px-2 py-1 text-xs rounded ${showRnbLayer ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
           onClick={onToggleRnbLayer}
         >
-          Bâtiments 2D
+          Contour de bâtiment
         </button>
       </div>
 
@@ -2807,6 +2955,16 @@ export function MapView() {
     };
   }, []);
 
+  // État dérivé du bâtiment détecté (empreinte teal + segments de façade).
+  // Factorisé car trois chemins l'effacent : reset template, "Fermer"/clic
+  // dans le vide, et Escape.
+  const clearDetectedBuildingState = useCallback(() => {
+    setDetectedBuilding(null);
+    setFacadeAssistSeedParams(null);
+    setFacadeSegmentOptions([]);
+    setSelectedFacadeSegmentId(null);
+  }, []);
+
   const resetTemplateState = useCallback(() => {
     setDragState(null);
     setRawPath([]);
@@ -2815,46 +2973,40 @@ export function MapView() {
     setGridParams(null);
     setFacadeParams(null);
     setPencilParams(null);
-    setDetectedBuilding(null);
-    setFacadeAssistSeedParams(null);
-    setFacadeSegmentOptions([]);
-    setSelectedFacadeSegmentId(null);
+    clearDetectedBuildingState();
     setFacadeVariantOptions([]);
     setSelectedFacadeVariantId(null);
     setFacadeAssistBusy(false);
     setFacadeAssistMessage(null);
     setFacadeRecommendation(null);
     setFacadeRecommendationBusy(false);
-  }, []);
+  }, [clearDetectedBuildingState]);
 
   const clearTransientMapUi = useCallback(() => {
     resetTemplateState();
     clearSelectedBuildingUi();
   }, [clearSelectedBuildingUi, resetTemplateState]);
 
-  // Escape returns the map to a neutral state: cancel in-progress drafts
-  // (templates, pencil path, obstacle drawing) and close building panels.
-  // (The App-level handler clears mission placement modes and selection.)
+  // Escape revient à l'état nominal : annule les brouillons en cours
+  // (templates, pencil, dessin d'obstacle), ferme les panneaux bâtiment et
+  // efface la sélection (y compris l'empreinte teal via resetTemplateState).
+  // Comme le handler App, Escape fonctionne même depuis un champ de saisie.
+  // (Le handler App efface en plus les modes de placement et la sélection
+  // de waypoints.)
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const tag = (event.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (
         templateMode ||
         rawPath.length > 0 ||
         dragState ||
-        drawingVertices.length > 0
-      ) {
-        clearTransientMapUi();
-        setDrawingVertices([]);
-      }
-      if (
+        drawingVertices.length > 0 ||
         selectedRnbBuilding ||
         showSelectedRnbInfo ||
         showSelectedBuildingScanPanel
       ) {
-        clearSelectedBuildingUi();
+        clearTransientMapUi();
+        setDrawingVertices([]);
       }
     };
     window.addEventListener("keydown", handler);
@@ -2868,7 +3020,6 @@ export function MapView() {
     showSelectedRnbInfo,
     showSelectedBuildingScanPanel,
     clearTransientMapUi,
-    clearSelectedBuildingUi,
     setDrawingVertices,
   ]);
 
@@ -3242,8 +3393,20 @@ export function MapView() {
   );
 
   const handleClearSelectedBuilding = useCallback(() => {
+    // Sans ça, l'empreinte teal + les segments de façade (dérivés de
+    // detectedBuilding) restaient affichés après "Fermer" ou un clic dans
+    // le vide : le dernier bâtiment semblait rester sélectionné.
+    // Gardé sous condition pour ne pas effacer l'aperçu d'un scan de
+    // façade générique (sans bâtiment RNB) lors d'un clic dans le vide.
+    if (selectedRnbBuilding) {
+      clearDetectedBuildingState();
+    }
     clearSelectedBuildingUi();
-  }, [clearSelectedBuildingUi]);
+  }, [
+    clearSelectedBuildingUi,
+    clearDetectedBuildingState,
+    selectedRnbBuilding,
+  ]);
 
   const openSelectedBuildingScanPanel = useCallback(() => {
     if (!selectedRnbBuilding) {
@@ -3950,8 +4113,8 @@ export function MapView() {
           />
         </Source>
         {/* Extruded 3D buildings (OpenFreeMap vector tiles, visible in 3D).
-            Hidden while the RNB layer is on: RNB footprints below carry
-            app-estimated heights instead of the flat render_height fallback. */}
+            Hidden while the contour layer is on: mode contour = relief +
+            tracés uniquement, sans bâtiments agrandis. */}
         <Source
           id="ofm-buildings"
           type="vector"
@@ -3982,15 +4145,16 @@ export function MapView() {
             }}
           />
         </Source>
-        {/* RNB footprints extruded with app-estimated heights (visible in 3D
-            while the RNB layer is on; selected building highlighted). */}
+        {/* Mode "Contour de bâtiment" : pas d'extrusion des bâtiments RNB
+            en 3D, uniquement le contour bleu épaissi (voir
+            RnbBuildingsLayer2D lineWidth ci-dessous). */}
         <Source id="rnb-buildings-3d" type="geojson" data={rnbExtrusionGeo}>
           <Layer
             id="rnb-buildings-3d-extrusion"
             type="fill-extrusion"
             minzoom={13}
             layout={{
-              visibility: mapLibre3D && showRnbLayer ? "visible" : "none",
+              visibility: "none",
             }}
             paint={{
               "fill-extrusion-color": [
@@ -4017,6 +4181,7 @@ export function MapView() {
           onBuildingsChange={setRnbBuildings}
           onSelectBuilding={handleSelectRnbBuilding}
           mapRef={mapRef}
+          lineWidth={mapLibre3D ? 4 : 2}
         />
 
         <MapInteraction2D
@@ -4516,7 +4681,7 @@ export function MapView() {
         isSatellite={mapTypeId === HYBRID_TYPE}
         onSelectStreet={() => setMapTypeId(ROADMAP_TYPE)}
         onSelectSatellite={() => setMapTypeId(HYBRID_TYPE)}
-        is3D={false}
+        is3D={is3D}
         onSelect2D={() => setIs3D(false)}
         onSelect3D={handleSelect3D}
         showRnbLayer={showRnbLayer}

@@ -132,6 +132,7 @@ export function PolygonOverlay2D({
   strokeColor = "#ef4444",
   fillColor = "#ef4444",
   fillOpacity = 0.15,
+  lineWidth = 2,
 }: any) {
   const baseId = useStableLayerId("polygon", id);
   const coords = [
@@ -155,10 +156,21 @@ export function PolygonOverlay2D({
         type="fill"
         paint={{ "fill-color": fillColor, "fill-opacity": fillOpacity }}
       />
+      {/* Halo blanc sous le contour : garde le tracé lisible sur fond
+          satellite (ortho chargée) comme en 3D avec pitch. */}
+      <Layer
+        id={`${baseId}-casing`}
+        type="line"
+        paint={{
+          "line-color": "#ffffff",
+          "line-width": lineWidth + 2,
+          "line-opacity": 0.7,
+        }}
+      />
       <Layer
         id={`${baseId}-line`}
         type="line"
-        paint={{ "line-color": strokeColor, "line-width": 2 }}
+        paint={{ "line-color": strokeColor, "line-width": lineWidth }}
       />
     </Source>
   );
@@ -171,6 +183,7 @@ export function RnbBuildingsLayer2D({
   onBuildingsChange,
   onSelectBuilding,
   mapRef,
+  lineWidth = 2,
 }: any) {
   useEffect(() => {
     if (!enabled || !mapRef?.current) return;
@@ -221,6 +234,7 @@ export function RnbBuildingsLayer2D({
             building.rnbId === selectedBuildingId ? "#22d3ee" : "#38bdf8"
           }
           fillOpacity={0.12}
+          lineWidth={lineWidth}
           onClick={() => {
             const center =
               building.centroid ?? building.point ?? building.footprint?.[0];
@@ -254,28 +268,78 @@ export function MapLibre3DController({
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const apply = () => {
-      if (cancelled) return;
+    let listenerAttached = false;
+    // (Ré)installe la source MNT + le relief, sans toucher à la caméra.
+    // Retourne false si la carte n'est pas prête (à réessayer plus tard).
+    const ensureTerrain = (): boolean => {
       try {
         const map = mapRef?.current?.getMap ? mapRef.current.getMap() : null;
-        if (!map || typeof map.addSource !== "function") {
-          timer = setTimeout(apply, 300);
-          return;
+        if (!map || typeof map.addSource !== "function") return false;
+        if (!map.getSource("terrain-dem")) {
+          map.addSource("terrain-dem", {
+            type: "raster-dem",
+            tiles: [
+              "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+            ],
+            tileSize: 256,
+            maxzoom: 15,
+            encoding: "terrarium",
+          });
         }
+        map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // Un changement de fond (Street <-> Satellite) remplace le style
+    // MapLibre et supprime les sources ajoutées impérativement : on
+    // ré-applique le relief sans bouger la caméra.
+    const onStyleData = () => {
+      if (!cancelled && active) ensureTerrain();
+    };
+    const apply = () => {
+      if (cancelled) return;
+      const map = (() => {
+        try {
+          return mapRef?.current?.getMap ? mapRef.current.getMap() : null;
+        } catch {
+          return null;
+        }
+      })();
+      if (!map || typeof map.addSource !== "function") {
+        timer = setTimeout(apply, 300);
+        return;
+      }
+      if (!listenerAttached) {
+        try {
+          map.on?.("styledata", onStyleData);
+          listenerAttached = true;
+        } catch {
+          // écoute optionnelle : le relief reste appliqué ci-dessous
+        }
+      }
+      try {
         if (active) {
-          if (!map.getSource("terrain-dem")) {
-            map.addSource("terrain-dem", {
-              type: "raster-dem",
-              tiles: [
-                "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
-              ],
-              tileSize: 256,
-              maxzoom: 15,
-              encoding: "terrarium",
-            });
+          if (!ensureTerrain()) {
+            timer = setTimeout(apply, 300);
+            return;
           }
-          map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
-          map.easeTo({ pitch: 60, duration: 800 });
+          // Dézoom d'un niveau à l'activation 3D : avec un pitch à 60°,
+          // garder le même zoom écrase la perspective et rend la carte
+          // illisible. Un niveau de moins garde le même centre tout en
+          // élargissant le champ visible.
+          const currentZoom =
+            typeof map.getZoom === "function" ? map.getZoom() : null;
+          const targetZoom =
+            typeof currentZoom === "number"
+              ? Math.max(0, currentZoom - 1)
+              : undefined;
+          map.easeTo({
+            pitch: 60,
+            ...(targetZoom !== undefined ? { zoom: targetZoom } : {}),
+            duration: 800,
+          });
         } else {
           try {
             if (map.getTerrain && map.getTerrain()) map.setTerrain(null);
@@ -294,6 +358,11 @@ export function MapLibre3DController({
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      try {
+        mapRef?.current?.getMap?.()?.off?.("styledata", onStyleData);
+      } catch {
+        // carte déjà démontée
+      }
     };
   }, [active, mapRef]);
 

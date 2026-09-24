@@ -25,6 +25,8 @@ services:
     #   args:
     #     COMMIT_SHA: ${COMMIT_SHA:-dev}
     container_name: droneroute
+    ports:
+      - "3001:3001"
     volumes:
       - droneroute-data:/app/data
     environment:
