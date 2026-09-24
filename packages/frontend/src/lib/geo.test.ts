@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRnbExtrusionCollection } from "./geo";
+import { buildRnbExtrusionCollection, getObstacleWarnings } from "./geo";
 
 describe("buildRnbExtrusionCollection", () => {
   it("builds closed polygons carrying ids and heights", () => {
@@ -34,5 +34,71 @@ describe("buildRnbExtrusionCollection", () => {
 
   it("returns an empty collection for no buildings", () => {
     expect(buildRnbExtrusionCollection([]).features).toHaveLength(0);
+  });
+});
+
+describe("getObstacleWarnings with heights", () => {
+  const square: [number, number][] = [
+    [0, 0],
+    [0, 1],
+    [1, 1],
+    [1, 0],
+  ];
+  const obstacle = {
+    id: "o1",
+    name: "Tower",
+    description: "",
+    vertices: square,
+    minHeightM: 10,
+    maxHeightM: 50,
+  };
+
+  it("warns when the flight passes through the height band", () => {
+    const warnings = getObstacleWarnings(
+      [
+        { latitude: -1, longitude: 0.5, index: 0, height: 30 },
+        { latitude: 2, longitude: 0.5, index: 1, height: 30 },
+      ],
+      [obstacle],
+    );
+    expect(warnings.some((w) => w.type === "crosses")).toBe(true);
+  });
+
+  it("stays silent when flying above maxHeightM", () => {
+    const warnings = getObstacleWarnings(
+      [
+        { latitude: -1, longitude: 0.5, index: 0, height: 60 },
+        { latitude: 2, longitude: 0.5, index: 1, height: 60 },
+      ],
+      [obstacle],
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("stays silent when flying below minHeightM", () => {
+    const warnings = getObstacleWarnings(
+      [
+        { latitude: -1, longitude: 0.5, index: 0, height: 5 },
+        { latitude: 2, longitude: 0.5, index: 1, height: 5 },
+      ],
+      [obstacle],
+    );
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("warns for a waypoint inside the polygon within the height band", () => {
+    const warnings = getObstacleWarnings(
+      [{ latitude: 0.5, longitude: 0.5, index: 0, height: 20 }],
+      [obstacle],
+    );
+    expect(warnings.some((w) => w.type === "inside")).toBe(true);
+  });
+
+  it("ignores a waypoint inside the polygon above maxHeightM", () => {
+    const warnings = getObstacleWarnings(
+      [{ latitude: 0.5, longitude: 0.5, index: 0, height: 80 }],
+      [obstacle],
+    );
+    expect(warnings).toHaveLength(0);
   });
 });

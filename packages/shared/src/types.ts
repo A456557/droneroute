@@ -220,6 +220,10 @@ export interface Obstacle {
   name: string;
   description: string;
   vertices: [number, number][]; // Array of [latitude, longitude] pairs
+  // Vertical extent in meters above ground (optional for missions saved
+  // before heights existed — use obstacleHeightMin/Max helpers for defaults).
+  minHeightM?: number;
+  maxHeightM?: number;
 }
 
 // ── Waypoint ─────────────────────────────────────────────

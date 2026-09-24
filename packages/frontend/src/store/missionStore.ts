@@ -9,6 +9,27 @@ import type {
 import { DEFAULT_MISSION_CONFIG, DEFAULT_WAYPOINT } from "@droneroute/shared";
 import { usePreferencesStore } from "@/store/preferencesStore";
 import type { TemplateType } from "@/lib/templates";
+import {
+  DEFAULT_OBSTACLE_MIN_HEIGHT_M,
+  DEFAULT_OBSTACLE_MAX_HEIGHT_M,
+  obstacleMaxHeightM,
+  obstacleMinHeightM,
+} from "@/lib/geo";
+
+/**
+ * Fill missing heights on obstacles saved before heights existed.
+ */
+export function normalizeObstacleHeights(obstacle: Obstacle): Obstacle {
+  const minHeightM = obstacleMinHeightM(obstacle);
+  const maxHeightM = obstacleMaxHeightM({ ...obstacle, minHeightM });
+  if (
+    obstacle.minHeightM === minHeightM &&
+    obstacle.maxHeightM === maxHeightM
+  ) {
+    return obstacle;
+  }
+  return { ...obstacle, minHeightM, maxHeightM };
+}
 
 export type SelectionMode = "replace" | "toggle" | "range";
 
@@ -418,6 +439,8 @@ export const useMissionStore = create<MissionState>((set, _get) => ({
         name: `Obstacle ${state.obstacles.length + 1}`,
         description: "",
         vertices,
+        minHeightM: DEFAULT_OBSTACLE_MIN_HEIGHT_M,
+        maxHeightM: DEFAULT_OBSTACLE_MAX_HEIGHT_M,
       };
       return {
         obstacles: [...state.obstacles, obstacle],
@@ -551,7 +574,7 @@ export const useMissionStore = create<MissionState>((set, _get) => ({
       config: data.config,
       waypoints: data.waypoints,
       pois: data.pois || [],
-      obstacles: data.obstacles || [],
+      obstacles: (data.obstacles || []).map(normalizeObstacleHeights),
       selectedWaypointIndices: new Set<number>(),
       lastSelectedWaypointIndex: null,
       selectedPoiId: null,

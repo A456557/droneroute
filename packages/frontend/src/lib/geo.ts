@@ -47,6 +47,32 @@ export function calculateIdealGimbalPitch(
 
 // ── Obstacle geometry utilities ──────────────────────────
 
+// Default vertical extent for obstacles without explicit heights (meters
+// above ground). Shared by the store, the editor and the map.
+export const DEFAULT_OBSTACLE_MIN_HEIGHT_M = 0;
+export const DEFAULT_OBSTACLE_MAX_HEIGHT_M = 30;
+
+/**
+ * Lower edge of an obstacle in meters (0 when unset).
+ */
+export function obstacleMinHeightM(obstacle: Obstacle): number {
+  const value = obstacle.minHeightM;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : DEFAULT_OBSTACLE_MIN_HEIGHT_M;
+}
+
+/**
+ * Upper edge of an obstacle in meters (30 when unset). Always >= min.
+ */
+export function obstacleMaxHeightM(obstacle: Obstacle): number {
+  const value = obstacle.maxHeightM;
+  const min = obstacleMinHeightM(obstacle);
+  return typeof value === "number" && Number.isFinite(value) && value >= min
+    ? value
+    : Math.max(min, DEFAULT_OBSTACLE_MAX_HEIGHT_M);
+}
+
 /**
  * Ray-casting point-in-polygon test.
  * Returns true if the point [lat, lng] is inside the polygon.
@@ -145,22 +171,40 @@ export interface ObstacleWarning {
 
 /**
  * Check all waypoints and flight path segments against all obstacles.
+ * A conflict only counts when the flight also overlaps the obstacle
+ * vertically ([minHeightM, maxHeightM]) — flying above maxHeightM clears it.
  * Returns a list of warnings for any conflicts found.
  */
 export function getObstacleWarnings(
-  waypoints: { latitude: number; longitude: number; index: number }[],
+  waypoints: {
+    latitude: number;
+    longitude: number;
+    index: number;
+    height?: number;
+  }[],
   obstacles: Obstacle[],
 ): ObstacleWarning[] {
   if (obstacles.length === 0 || waypoints.length === 0) return [];
 
   const warnings: ObstacleWarning[] = [];
+  // Waypoint heights are AGL flight altitudes; obstacles are AGL extents.
+  // Missing heights default to 0 (ground level → conflict when overlapping).
+  const heightOf = (wp: { height?: number }): number =>
+    typeof wp.height === "number" && Number.isFinite(wp.height) ? wp.height : 0;
 
   for (const obstacle of obstacles) {
     if (obstacle.vertices.length < 3) continue;
+    const minH = obstacleMinHeightM(obstacle);
+    const maxH = obstacleMaxHeightM(obstacle);
 
     // Check waypoints inside polygon
     for (const wp of waypoints) {
-      if (pointInPolygon([wp.latitude, wp.longitude], obstacle.vertices)) {
+      const h = heightOf(wp);
+      if (
+        h >= minH &&
+        h <= maxH &&
+        pointInPolygon([wp.latitude, wp.longitude], obstacle.vertices)
+      ) {
         warnings.push({
           obstacleId: obstacle.id,
           obstacleName: obstacle.name,
@@ -174,6 +218,10 @@ export function getObstacleWarnings(
     for (let i = 0; i < waypoints.length - 1; i++) {
       const wp1 = waypoints[i];
       const wp2 = waypoints[i + 1];
+      const segMin = Math.min(heightOf(wp1), heightOf(wp2));
+      const segMax = Math.max(heightOf(wp1), heightOf(wp2));
+      if (segMin > maxH || segMax < minH) continue;
+
       const p1: [number, number] = [wp1.latitude, wp1.longitude];
       const p2: [number, number] = [wp2.latitude, wp2.longitude];
 

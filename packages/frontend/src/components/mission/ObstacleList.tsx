@@ -1,10 +1,22 @@
 import { useState, useRef } from "react";
 import { Triangle, X, Settings } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMissionStore } from "@/store/missionStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
-import { polygonArea, formatArea } from "@/lib/geo";
+import {
+  polygonArea,
+  formatArea,
+  obstacleMinHeightM,
+  obstacleMaxHeightM,
+} from "@/lib/geo";
+import {
+  formatHeight,
+  heightLabel,
+  toDisplayHeight,
+  fromDisplayHeight,
+} from "@/lib/units";
 
 export function ObstacleList() {
   const {
@@ -94,7 +106,10 @@ export function ObstacleList() {
                 )}
                 <div className="text-[10px] text-muted-foreground">
                   {obstacle.vertices.length} vertices &middot;{" "}
-                  {formatArea(polygonArea(obstacle.vertices), unitSystem)}
+                  {formatArea(polygonArea(obstacle.vertices), unitSystem)}{" "}
+                  &middot;{" "}
+                  {formatHeight(obstacleMinHeightM(obstacle), unitSystem)} –{" "}
+                  {formatHeight(obstacleMaxHeightM(obstacle), unitSystem)}
                 </div>
               </div>
               <Button
@@ -127,6 +142,65 @@ export function ObstacleList() {
             {/* Inline editor */}
             {isEditorOpen && (
               <div className="ml-4 mr-1 mt-1 mb-2 border-l-2 border-red-400/30 bg-red-500/5 rounded-r-md p-3 space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label className="text-xs">
+                      Hauteur mini ({heightLabel(unitSystem)})
+                    </Label>
+                    <Input
+                      type="number"
+                      value={toDisplayHeight(
+                        obstacleMinHeightM(obstacle),
+                        unitSystem,
+                      )}
+                      onChange={(e) => {
+                        const maxM = obstacleMaxHeightM(obstacle);
+                        const next = Math.min(
+                          Math.max(
+                            0,
+                            fromDisplayHeight(
+                              parseFloat(e.target.value) || 0,
+                              unitSystem,
+                            ),
+                          ),
+                          maxM,
+                        );
+                        updateObstacle(obstacle.id, { minHeightM: next });
+                      }}
+                      min={0}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">
+                      Hauteur maxi ({heightLabel(unitSystem)})
+                    </Label>
+                    <Input
+                      type="number"
+                      value={toDisplayHeight(
+                        obstacleMaxHeightM(obstacle),
+                        unitSystem,
+                      )}
+                      onChange={(e) => {
+                        const minM = obstacleMinHeightM(obstacle);
+                        const next = Math.max(
+                          minM,
+                          Math.min(
+                            500,
+                            fromDisplayHeight(
+                              parseFloat(e.target.value) || 0,
+                              unitSystem,
+                            ),
+                          ),
+                        );
+                        updateObstacle(obstacle.id, { maxHeightM: next });
+                      }}
+                      min={0}
+                      max={500}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                </div>
                 <div>
                   <Label className="text-xs">Description</Label>
                   <textarea

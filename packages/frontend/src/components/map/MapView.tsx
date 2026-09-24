@@ -20,7 +20,12 @@ import {
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
-import { buildRnbExtrusionCollection, getObstacleWarnings } from "@/lib/geo";
+import {
+  buildRnbExtrusionCollection,
+  getObstacleWarnings,
+  obstacleMaxHeightM,
+  obstacleMinHeightM,
+} from "@/lib/geo";
 import {
   type BdnbBuildingEnrichment,
   buildingApi,
@@ -3476,7 +3481,12 @@ export function MapView() {
           ring.push(ring[0]);
           return {
             type: "Feature",
-            properties: { id: o.id, name: o.name },
+            properties: {
+              id: o.id,
+              name: o.name,
+              minH: obstacleMinHeightM(o),
+              maxH: obstacleMaxHeightM(o),
+            },
             geometry: { type: "Polygon", coordinates: [ring] },
           };
         }),
@@ -3964,6 +3974,20 @@ export function MapView() {
               "line-color": "#ef4444",
               "line-width": 2,
               "line-dasharray": [2, 2],
+            }}
+          />
+          {/* Volume min→max en 3D pour visualiser la hauteur paramétrée. */}
+          <Layer
+            id="obstacles-3d"
+            type="fill-extrusion"
+            layout={{
+              visibility: mapLibre3D ? "visible" : "none",
+            }}
+            paint={{
+              "fill-extrusion-color": "#ef4444",
+              "fill-extrusion-height": ["coalesce", ["get", "maxH"], 30],
+              "fill-extrusion-base": ["coalesce", ["get", "minH"], 0],
+              "fill-extrusion-opacity": 0.35,
             }}
           />
         </Source>
