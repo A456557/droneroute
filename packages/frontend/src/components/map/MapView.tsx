@@ -4263,21 +4263,49 @@ export function MapView() {
               <div
                 title={`${waypoint.name}\nAlt: ${waypoint.height}m | Speed: ${waypoint.speed}m/s\nGimbal: ${waypoint.gimbalPitchAngle}°\n${waypoint.latitude.toFixed(6)}, ${waypoint.longitude.toFixed(6)}`}
                 style={{
+                  position: "relative",
                   width: 20,
                   height: 20,
-                  borderRadius: 10,
-                  background: selected ? "#3b82f6" : "#f59e0b",
-                  border: `2px solid ${selected ? "#93c5fd" : "#7c2d12"}`,
-                  color: "#fff",
-                  fontSize: 10,
-                  fontWeight: 700,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
                   cursor: "pointer",
                 }}
               >
-                {i + 1}
+                <div
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 10,
+                    background: "#3b82f6",
+                    border: `2px solid ${selected ? "#ffffff" : "#1e40af"}`,
+                    boxShadow: selected
+                      ? "0 0 0 3px rgba(59,130,246,0.45), 0 1px 5px rgba(0,0,0,0.55)"
+                      : "0 1px 4px rgba(0,0,0,0.5)",
+                  }}
+                />
+                {/* Numéro au-dessus du rond (et non dedans) : visible à
+                    tous les zooms, hors de la ligne de vol, contrasté sur
+                    tous les fonds (plan comme satellite). */}
+                <div
+                  style={{
+                    position: "absolute",
+                    bottom: 24,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    background: "#3b82f6",
+                    border: `2px solid ${selected ? "#ffffff" : "#1e40af"}`,
+                    color: "#fff",
+                    fontSize: 12,
+                    fontWeight: 800,
+                    borderRadius: 9,
+                    padding: "2px 7px",
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                    boxShadow: selected
+                      ? "0 0 0 3px rgba(59,130,246,0.45), 0 1px 5px rgba(0,0,0,0.55)"
+                      : "0 1px 5px rgba(0,0,0,0.55)",
+                  }}
+                >
+                  {i + 1}
+                </div>
               </div>
             </GLMarker>
           );
