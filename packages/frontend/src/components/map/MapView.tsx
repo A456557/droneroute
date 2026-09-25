@@ -22,8 +22,7 @@ import {
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
-import { usePreferencesStore } from "@/store/preferencesStore";
-import { formatHeight } from "@/lib/units";
+
 import {
   buildRnbExtrusionCollection,
   getObstacleWarnings,
@@ -2496,7 +2495,6 @@ export function MapView() {
   const isDrawingObstacle = useMissionStore((s) => s.isDrawingObstacle);
   const addWaypoint = useMissionStore((s) => s.addWaypoint);
   const addPoi = useMissionStore((s) => s.addPoi);
-  const unitSystem = usePreferencesStore((s) => s.preferences.unitSystem);
 
   const [mapTypeId, setMapTypeId] = useState<string>(ROADMAP_TYPE);
   const [is3D, setIs3D] = useState(false);
@@ -3468,17 +3466,6 @@ export function MapView() {
     } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
   }, [waypoints]);
 
-  const pointsGeo = useMemo(() => {
-    return {
-      type: "FeatureCollection",
-      features: waypoints.map((w) => ({
-        type: "Feature",
-        properties: { index: w.index },
-        geometry: { type: "Point", coordinates: [w.longitude, w.latitude] },
-      })),
-    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
-  }, [waypoints]);
-
   // GeoJSON for POIs, obstacles and the obstacle-drawing preview (2D view)
   const poisGeo = useMemo(() => {
     return {
@@ -4088,23 +4075,6 @@ export function MapView() {
             }}
           />
         </Source>
-        <Source id="points" type="geojson" data={pointsGeo}>
-          <Layer
-            id="points-circle"
-            type="circle"
-            // Masqués en 3D : les marqueurs flottants prennent le relais
-            // (sinon deux ronds par waypoint, au sol et en l'air).
-            layout={{
-              visibility: mapLibre3D ? "none" : "visible",
-            }}
-            paint={{
-              "circle-radius": 6,
-              "circle-color": "#2563eb",
-              "circle-stroke-color": "#fff",
-              "circle-stroke-width": 1,
-            }}
-          />
-        </Source>
         <Source id="pois" type="geojson" data={poisGeo}>
           <Layer
             id="pois-circle"
@@ -4511,55 +4481,30 @@ export function MapView() {
                 );
               }}
             >
+              {/* Pastille compacte : numéro dans le rond, infobulle
+                  complète au survol (nom, altitude, vitesse, position). */}
               <div
                 title={`${waypoint.name}\nAlt: ${waypoint.height}m | Speed: ${waypoint.speed}m/s\nGimbal: ${waypoint.gimbalPitchAngle}°\n${waypoint.latitude.toFixed(6)}, ${waypoint.longitude.toFixed(6)}`}
                 data-wp-index={waypoint.index}
                 style={{
-                  position: "relative",
-                  width: 20,
-                  height: 20,
+                  width: 14,
+                  height: 14,
+                  borderRadius: 7,
+                  background: "#3b82f6",
+                  border: `1.5px solid ${selected ? "#ffffff" : "#1e40af"}`,
+                  color: "#fff",
+                  fontSize: 9,
+                  fontWeight: 800,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
                   cursor: "pointer",
+                  boxShadow: selected
+                    ? "0 0 0 3px rgba(59,130,246,0.45), 0 1px 5px rgba(0,0,0,0.55)"
+                    : "0 1px 4px rgba(0,0,0,0.5)",
                 }}
               >
-                <div
-                  style={{
-                    width: 20,
-                    height: 20,
-                    borderRadius: 10,
-                    background: "#3b82f6",
-                    border: `2px solid ${selected ? "#ffffff" : "#1e40af"}`,
-                    boxShadow: selected
-                      ? "0 0 0 3px rgba(59,130,246,0.45), 0 1px 5px rgba(0,0,0,0.55)"
-                      : "0 1px 4px rgba(0,0,0,0.5)",
-                  }}
-                />
-                {/* Numéro collé au-dessus du rond (1px de recouvrement
-                    pour fusionner visuellement badge et point) : visible à
-                    tous les zooms, hors de la ligne de vol, contrasté sur
-                    tous les fonds (plan comme satellite). */}
-                <div
-                  data-wp-badge="true"
-                  style={{
-                    position: "absolute",
-                    bottom: 19,
-                    left: "50%",
-                    transform: "translateX(-50%)",
-                    background: "#3b82f6",
-                    border: `2px solid ${selected ? "#ffffff" : "#1e40af"}`,
-                    color: "#fff",
-                    fontSize: 12,
-                    fontWeight: 800,
-                    borderRadius: 9,
-                    padding: "2px 7px",
-                    whiteSpace: "nowrap",
-                    pointerEvents: "none",
-                    boxShadow: selected
-                      ? "0 0 0 3px rgba(59,130,246,0.45), 0 1px 5px rgba(0,0,0,0.55)"
-                      : "0 1px 5px rgba(0,0,0,0.55)",
-                  }}
-                >
-                  {i + 1} · {formatHeight(waypoint.height, unitSystem)}
-                </div>
+                {i + 1}
               </div>
             </GLMarker>
           );
