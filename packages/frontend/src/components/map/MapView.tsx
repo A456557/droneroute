@@ -2863,6 +2863,10 @@ export function MapView() {
         buildingApi.matchBdTopoBuilding({
           rnbId: currentBuilding.rnbId,
           bdTopoId: currentBuilding.bdTopoId,
+          // Le backend privilégie la recherche spatiale (< 1 s) quand il
+          // a un point de départ.
+          lat: currentBuilding.centroid?.lat ?? currentBuilding.point.lat,
+          lng: currentBuilding.centroid?.lng ?? currentBuilding.point.lng,
         }),
         buildingApi.enrichBdnbBuilding({
           rnbId: currentBuilding.rnbId,

@@ -247,7 +247,12 @@ export const buildingApi = {
     api.post<DetectBuildingResponse>("/buildings/detect", body),
   listRnbBuildings: (bbox: [number, number, number, number]) =>
     api.get<RnbBuildingsResponse>(`/buildings/rnb?bbox=${bbox.join(",")}`),
-  matchBdTopoBuilding: (body: { rnbId?: string; bdTopoId?: string | null }) =>
+  matchBdTopoBuilding: (body: {
+    rnbId?: string;
+    bdTopoId?: string | null;
+    lat?: number;
+    lng?: number;
+  }) =>
     api.post<BdTopoMatchedBuildingResponse>("/buildings/bdtopo-match", body),
   enrichBdnbBuilding: (body: { rnbId: string }) =>
     api.post<BdnbBuildingEnrichmentResponse>("/buildings/bdnb-enrich", body),

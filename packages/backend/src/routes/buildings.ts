@@ -734,7 +734,138 @@ async function fetchRnbBuildingsForBbox(
     .filter((building): building is RnbBuildingResponse => building !== null);
 }
 
-async function fetchBdTopoBuildingMatch(args: {
+const BDTOPO_WFS_URL = "https://data.geopf.fr/wfs/ows";
+const BDTOPO_REQUEST_TIMEOUT_MS = 10000;
+// Requêtes attributaires lentes côté IGN (10-50 s mesurées) : on les borne
+// et on préfère la recherche spatiale (< 1 s via l'index géographique).
+// Fenêtre resserrée (~110 m) autour du centroïde RNB : le bâtiment BD TOPO
+// cherché s'y trouve, avec peu de voisins (une large fenêtre tronque à
+// `count` et peut rater la cible).
+const BDTOPO_SPATIAL_HALF_DEG = 0.001;
+const BDTOPO_SPATIAL_COUNT = 25;
+const BDTOPO_CACHE_MAX_ENTRIES = 1000;
+const BDTOPO_CACHE_POSITIVE_TTL_MS = 24 * 3600 * 1000;
+const BDTOPO_CACHE_NEGATIVE_TTL_MS = 10 * 60 * 1000;
+
+interface BdTopoCacheEntry {
+  value: BdTopoMatchedBuildingResponse | null;
+  expiresAt: number;
+}
+
+const bdTopoMatchCache = new Map<string, BdTopoCacheEntry>();
+
+export function bdTopoCacheKey(args: {
+  rnbId?: string;
+  bdTopoId?: string;
+}): string {
+  if (args.bdTopoId) return `cleabs:${args.bdTopoId}`;
+  return `rnb:${args.rnbId ?? ""}`;
+}
+
+export function getBdTopoCache(
+  key: string,
+  now: number = Date.now(),
+): BdTopoMatchedBuildingResponse | null | undefined {
+  const entry = bdTopoMatchCache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt <= now) {
+    bdTopoMatchCache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+export function setBdTopoCache(
+  key: string,
+  value: BdTopoMatchedBuildingResponse | null,
+  now: number = Date.now(),
+): void {
+  while (bdTopoMatchCache.size >= BDTOPO_CACHE_MAX_ENTRIES) {
+    const oldest = bdTopoMatchCache.keys().next();
+    if (oldest.done) break;
+    bdTopoMatchCache.delete(oldest.value);
+  }
+  bdTopoMatchCache.set(key, {
+    value,
+    expiresAt:
+      now +
+      (value === null
+        ? BDTOPO_CACHE_NEGATIVE_TTL_MS
+        : BDTOPO_CACHE_POSITIVE_TTL_MS),
+  });
+}
+
+export function clearBdTopoCache(): void {
+  bdTopoMatchCache.clear();
+}
+
+// WFS 2.0 + EPSG:4326 => ordre lat,lng (inversé par rapport à GeoJSON) !
+export function buildBdTopoBbox(
+  lat: number,
+  lng: number,
+  halfDeg: number = BDTOPO_SPATIAL_HALF_DEG,
+): string {
+  const round6 = (value: number): number => Math.round(value * 1e6) / 1e6;
+  const south = round6(lat - halfDeg);
+  const north = round6(lat + halfDeg);
+  const west = round6(lng - halfDeg);
+  const east = round6(lng + halfDeg);
+  return `${south},${west},${north},${east},urn:ogc:def:crs:EPSG::4326`;
+}
+
+function bdTopoRnbIdsContain(rnbIds: unknown, rnbId: string): boolean {
+  if (typeof rnbIds !== "string" || rnbIds.length === 0) return false;
+  return rnbIds.split(/[,\s;]+/).some((part) => part === rnbId);
+}
+
+type BdTopoFeature = NonNullable<BdTopoFeatureResponse["features"]>[number];
+
+export function pickBdTopoMatch(
+  features: BdTopoFeatureResponse["features"],
+  args: { rnbId?: string; bdTopoId?: string },
+): BdTopoFeature | undefined {
+  if (!Array.isArray(features)) return undefined;
+  if (args.bdTopoId) {
+    return features.find(
+      (feature) => feature?.properties?.["cleabs"] === args.bdTopoId,
+    );
+  }
+  if (args.rnbId) {
+    return features.find((feature) =>
+      bdTopoRnbIdsContain(
+        feature?.properties?.["identifiants_rnb"],
+        args.rnbId as string,
+      ),
+    );
+  }
+  return undefined;
+}
+
+function bdTopoWfsBase(count: number): URL {
+  const url = new URL(BDTOPO_WFS_URL);
+  url.searchParams.set("service", "WFS");
+  url.searchParams.set("version", "2.0.0");
+  url.searchParams.set("request", "GetFeature");
+  url.searchParams.set("typeNames", "BDTOPO_V3:batiment");
+  url.searchParams.set("outputFormat", "application/json");
+  url.searchParams.set("count", String(count));
+  return url;
+}
+
+async function readBdTopoFeatures(url: URL): Promise<BdTopoFeature[]> {
+  const response = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(BDTOPO_REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`BD TOPO request failed with status ${response.status}`);
+  }
+  const payload = (await response.json()) as BdTopoFeatureResponse;
+  return Array.isArray(payload.features) ? payload.features : [];
+}
+
+// Repli historique (sans coordonnées) : filtre attributaire exact ou LIKE,
+// borné par timeout car l'IGN met 10-50 s à répondre sur ces requêtes.
+async function fetchBdTopoByAttribute(args: {
   rnbId?: string;
   bdTopoId?: string;
 }): Promise<BdTopoMatchedBuildingResponse | null> {
@@ -748,25 +879,30 @@ async function fetchBdTopoBuildingMatch(args: {
     return null;
   }
 
-  const url = new URL("https://data.geopf.fr/wfs/ows");
-  url.searchParams.set("service", "WFS");
-  url.searchParams.set("version", "2.0.0");
-  url.searchParams.set("request", "GetFeature");
-  url.searchParams.set("typeNames", "BDTOPO_V3:batiment");
-  url.searchParams.set("outputFormat", "application/json");
-  url.searchParams.set("count", "1");
+  const url = bdTopoWfsBase(1);
   url.searchParams.set("CQL_FILTER", filter);
+  const features = await readBdTopoFeatures(url);
+  return normalizeBdTopoFeature(features[0]);
+}
 
-  const response = await fetch(url.toString());
-  if (!response.ok) {
-    throw new Error(`BD TOPO request failed with status ${response.status}`);
+async function fetchBdTopoBuildingMatch(args: {
+  rnbId?: string;
+  bdTopoId?: string;
+  lat?: number;
+  lng?: number;
+}): Promise<BdTopoMatchedBuildingResponse | null> {
+  const lat = args.lat;
+  const lng = args.lng;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return fetchBdTopoByAttribute(args);
   }
 
-  const payload = (await response.json()) as BdTopoFeatureResponse;
-  const feature = Array.isArray(payload.features)
-    ? payload.features[0]
-    : undefined;
-  return normalizeBdTopoFeature(feature);
+  // Chemin rapide : une seule requête spatiale (< 1 s), appariement exact
+  // côté serveur sur cleabs ou identifiants_rnb.
+  const url = bdTopoWfsBase(BDTOPO_SPATIAL_COUNT);
+  url.searchParams.set("bbox", buildBdTopoBbox(lat as number, lng as number));
+  const features = await readBdTopoFeatures(url);
+  return normalizeBdTopoFeature(pickBdTopoMatch(features, args));
 }
 
 async function fetchBdnbRows(
@@ -778,7 +914,9 @@ async function fetchBdnbRows(
     url.searchParams.set(key, value);
   }
 
-  const response = await fetch(url.toString());
+  const response = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(BDTOPO_REQUEST_TIMEOUT_MS),
+  });
   if (!response.ok) {
     throw new Error(
       `BDNB request failed for ${table} with status ${response.status}`,
@@ -894,17 +1032,31 @@ buildingRoutes.get("/rnb", async (req, res) => {
 });
 
 buildingRoutes.post("/bdtopo-match", async (req, res) => {
-  const { rnbId, bdTopoId } = (req.body ?? {}) as {
+  const { rnbId, bdTopoId, lat, lng } = (req.body ?? {}) as {
     rnbId?: unknown;
     bdTopoId?: unknown;
+    lat?: unknown;
+    lng?: unknown;
   };
 
   const normalizedRnbId = typeof rnbId === "string" ? rnbId : undefined;
   const normalizedBdTopoId =
     typeof bdTopoId === "string" ? bdTopoId : undefined;
+  const normalizedLat = typeof lat === "number" ? lat : undefined;
+  const normalizedLng = typeof lng === "number" ? lng : undefined;
 
   if (!normalizedRnbId && !normalizedBdTopoId) {
     res.status(400).json({ error: "rnbId or bdTopoId is required" });
+    return;
+  }
+
+  const cacheKey = bdTopoCacheKey({
+    rnbId: normalizedRnbId,
+    bdTopoId: normalizedBdTopoId,
+  });
+  const cached = getBdTopoCache(cacheKey);
+  if (cached !== undefined) {
+    res.json({ building: cached });
     return;
   }
 
@@ -912,7 +1064,10 @@ buildingRoutes.post("/bdtopo-match", async (req, res) => {
     const building = await fetchBdTopoBuildingMatch({
       rnbId: normalizedRnbId,
       bdTopoId: normalizedBdTopoId,
+      lat: normalizedLat,
+      lng: normalizedLng,
     });
+    setBdTopoCache(cacheKey, building);
     res.json({ building });
   } catch (error) {
     console.error("BD TOPO match error:", error);
