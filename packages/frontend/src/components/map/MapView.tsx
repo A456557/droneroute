@@ -16,10 +16,14 @@ import {
   RnbBuildingsLayer2D,
   MapInteraction2D,
   MapLibre3DController,
+  WaypointBadgeAltitudeController,
+  waypointAltitudeOffsetPx,
 } from "./reactMapOverlays";
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
+import { usePreferencesStore } from "@/store/preferencesStore";
+import { formatHeight } from "@/lib/units";
 import {
   buildRnbExtrusionCollection,
   getObstacleWarnings,
@@ -1349,7 +1353,15 @@ function buildReconstructionPresets(
   const spanNorthSouthM = haversine(minLat, minLng, maxLat, minLng);
   const spanEastWestM = haversine(minLat, minLng, minLat, maxLng);
   const footprintSizeM = Math.max(spanNorthSouthM, spanEastWestM, 18);
-  const estimatedHeightM = clamp(building.estimatedHeightM ?? 24, 12, 120);
+  // Hauteur réelle (plus de plancher à 12 m qui gonflait les petits
+  // bâtiments : un bâtiment de 5 m donnait 34/40 m d'altitude).
+  const estimatedHeightM = clamp(building.estimatedHeightM ?? 24, 3, 120);
+  // Marges proportionnelles : identiques aux anciennes valeurs fixes pour
+  // un bâtiment de ~24 m, réduites pour les petits bâtiments (avec des
+  // planchers de sécurité : les alertes obstacles gardent le vol).
+  const gridClearanceM = clamp(estimatedHeightM, 12, 22);
+  const roofClearanceM = clamp(estimatedHeightM * 1.2, 15, 28);
+  const orbitClearanceM = clamp(estimatedHeightM * 0.8, 10, 18);
 
   let longestEdgeLengthM = 0;
   let longestEdgeBearingDeg = 0;
@@ -1379,7 +1391,16 @@ function buildReconstructionPresets(
         )
       : longestEdgeBearingDeg;
 
-  const buildingGridAltitude = Math.round(clamp(estimatedHeightM + 22, 28, 90));
+  const buildingGridAltitude = Math.round(
+    clamp(estimatedHeightM + gridClearanceM, 24, 90),
+  );
+  const roofGridAltitude = Math.round(
+    clamp(estimatedHeightM + roofClearanceM, 30, 120),
+  );
+  const orbitAltitude = Math.round(
+    clamp(estimatedHeightM + orbitClearanceM, 20, 120),
+  );
+  const orbitRadiusM = Math.round(clamp(footprintSizeM * 0.7, 18, 70));
   const buildingGridSpacingM = Math.round(clamp(footprintSizeM / 7, 10, 18));
   const facadeDistanceM = Math.round(
     clamp(Math.max(12, estimatedHeightM * 0.55), 12, 28),
@@ -1406,7 +1427,7 @@ function buildReconstructionPresets(
     {
       id: "roof-grid",
       label: "Roof nadir",
-      detail: `${Math.round(estimatedHeightM + 28)}m • ${Math.round(clamp(footprintSizeM / 5, 8, 20))}m spacing`,
+      detail: `${roofGridAltitude}m • ${Math.round(clamp(footprintSizeM / 5, 8, 20))}m spacing`,
       description:
         "Classic nadir roof pass aligned to the footprint for top-down roof coverage.",
       templateType: "grid",
@@ -1414,7 +1435,7 @@ function buildReconstructionPresets(
         ...DEFAULT_GRID_PARAMS,
         corner1: [minLat, minLng],
         corner2: [maxLat, maxLng],
-        altitude: Math.round(clamp(estimatedHeightM + 28, 35, 120)),
+        altitude: roofGridAltitude,
         spacingM: Math.round(clamp(footprintSizeM / 5, 8, 20)),
         addPhotos: true,
         crosshatch: false,
@@ -1504,15 +1525,15 @@ function buildReconstructionPresets(
     {
       id: "oblique-orbit",
       label: "Oblique orbit",
-      detail: `${Math.round(clamp(footprintSizeM * 0.7, 18, 70))}m radius • ${Math.round(clamp(estimatedHeightM + 18, 25, 120))}m alt`,
+      detail: `${orbitRadiusM}m radius • ${orbitAltitude}m alt`,
       description:
         "Circular oblique ring around the footprint to capture facades and roof edges.",
       templateType: "orbit",
       orbitParams: {
         ...DEFAULT_ORBIT_PARAMS,
         center: [building.centroid.lat, building.centroid.lng],
-        radiusM: Math.round(clamp(footprintSizeM * 0.7, 18, 70)),
-        altitude: Math.round(clamp(estimatedHeightM + 18, 25, 120)),
+        radiusM: orbitRadiusM,
+        altitude: orbitAltitude,
         numPoints: Math.round(clamp(Math.ceil(footprintSizeM / 6) + 6, 10, 20)),
         clockwise: true,
         createPoi: true,
@@ -2475,6 +2496,7 @@ export function MapView() {
   const isDrawingObstacle = useMissionStore((s) => s.isDrawingObstacle);
   const addWaypoint = useMissionStore((s) => s.addWaypoint);
   const addPoi = useMissionStore((s) => s.addPoi);
+  const unitSystem = usePreferencesStore((s) => s.preferences.unitSystem);
 
   const [mapTypeId, setMapTypeId] = useState<string>(ROADMAP_TYPE);
   const [is3D, setIs3D] = useState(false);
@@ -3553,6 +3575,135 @@ export function MapView() {
     return { normal: toCollection(normal), warned: toCollection(warned) };
   }, [waypoints, warningSegments]);
 
+  // Rideau vertical sous le tracé (visible en 3D uniquement) : chaque
+  // segment devient un mur fin montant du sol à l'altitude du segment.
+  // La ligne plate ne peut pas montrer les hauteurs (drapée au terrain),
+  // le rideau si.
+  const routeCurtainGeo = useMemo(() => {
+    const toWalls = (segments: [number, number][][], heights: number[]) =>
+      ({
+        type: "FeatureCollection",
+        features: segments.map((coordinates, index) => {
+          const [lng1, lat1] = coordinates[0];
+          const [lng2, lat2] = coordinates[1];
+          const perpRad =
+            ((bearingTo(lat1, lng1, lat2, lng2) + 90) * Math.PI) / 180;
+          // Demi-largeur 1,5 m : lisible en zoom bâtiment sans épaissir
+          // le tracé à l'échelle quartier.
+          const northM = Math.cos(perpRad) * 1.5;
+          const eastM = Math.sin(perpRad) * 1.5;
+          const [plus1Lat, plus1Lng] = offsetMeters(lat1, lng1, northM, eastM);
+          const [plus2Lat, plus2Lng] = offsetMeters(lat2, lng2, northM, eastM);
+          const [minus1Lat, minus1Lng] = offsetMeters(
+            lat1,
+            lng1,
+            -northM,
+            -eastM,
+          );
+          const [minus2Lat, minus2Lng] = offsetMeters(
+            lat2,
+            lng2,
+            -northM,
+            -eastM,
+          );
+          return {
+            type: "Feature",
+            properties: { h: heights[index] ?? 0 },
+            geometry: {
+              type: "Polygon",
+              coordinates: [
+                [
+                  [plus1Lng, plus1Lat],
+                  [plus2Lng, plus2Lat],
+                  [minus2Lng, minus2Lat],
+                  [minus1Lng, minus1Lat],
+                  [plus1Lng, plus1Lat],
+                ],
+              ],
+            },
+          };
+        }),
+      }) as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+    const normalSegs: [number, number][][] = [];
+    const normalHeights: number[] = [];
+    const warnedSegs: [number, number][][] = [];
+    const warnedHeights: number[] = [];
+    waypoints.slice(0, -1).forEach((waypoint, index) => {
+      const next = waypoints[index + 1];
+      const segment: [number, number][] = [
+        [waypoint.longitude, waypoint.latitude],
+        [next.longitude, next.latitude],
+      ];
+      const height = Math.max(waypoint.height, next.height);
+      if (warningSegments.has(waypoint.index)) {
+        warnedSegs.push(segment);
+        warnedHeights.push(height);
+      } else {
+        normalSegs.push(segment);
+        normalHeights.push(height);
+      }
+    });
+    return {
+      normal: toWalls(normalSegs, normalHeights),
+      warned: toWalls(warnedSegs, warnedHeights),
+    };
+  }, [waypoints, warningSegments]);
+
+  // Colonnes 3D par waypoint (visibles en 3D uniquement) : chaque point
+  // monte du sol à sa hauteur exacte — le sommet de la colonne EST le
+  // waypoint à son altitude (les marqueurs DOM restent au sol pour le
+  // drag & clic).
+  const waypointPillarsGeo = useMemo(() => {
+    return {
+      type: "FeatureCollection",
+      features: waypoints.map((waypoint) => {
+        const [n1Lat, n1Lng] = offsetMeters(
+          waypoint.latitude,
+          waypoint.longitude,
+          1,
+          1,
+        );
+        const [n2Lat, n2Lng] = offsetMeters(
+          waypoint.latitude,
+          waypoint.longitude,
+          1,
+          -1,
+        );
+        const [n3Lat, n3Lng] = offsetMeters(
+          waypoint.latitude,
+          waypoint.longitude,
+          -1,
+          -1,
+        );
+        const [n4Lat, n4Lng] = offsetMeters(
+          waypoint.latitude,
+          waypoint.longitude,
+          -1,
+          1,
+        );
+        return {
+          type: "Feature",
+          properties: {
+            h: waypoint.height,
+            selected: selectedWaypointIndices.has(waypoint.index),
+          },
+          geometry: {
+            type: "Polygon",
+            coordinates: [
+              [
+                [n1Lng, n1Lat],
+                [n2Lng, n2Lat],
+                [n3Lng, n3Lat],
+                [n4Lng, n4Lat],
+                [n1Lng, n1Lat],
+              ],
+            ],
+          },
+        };
+      }),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [waypoints, selectedWaypointIndices]);
+
   // Green dashed lines from "toward POI" waypoints to their POI.
   const poiLinesGeo = useMemo(() => {
     return {
@@ -3922,6 +4073,9 @@ export function MapView() {
         // types (v5-only API); the runtime APIs we use are identical.
         mapLib={maplibregl as any}
         mapStyle={mapTypeId === HYBRID_TYPE ? IGN_ORTHO_STYLE : IGN_PLAN_STYLE}
+        // Fonds IGN plafonnés au zoom 19 : au-delà, les tuiles n'existent
+        // pas et la carte affiche du vide (zones noires en zoom bâtiment).
+        maxZoom={19}
         style={{ width: "100%", height: "100%" }}
       >
         <Source id="route" type="geojson" data={routeGeo}>
@@ -3938,6 +4092,11 @@ export function MapView() {
           <Layer
             id="points-circle"
             type="circle"
+            // Masqués en 3D : les marqueurs flottants prennent le relais
+            // (sinon deux ronds par waypoint, au sol et en l'air).
+            layout={{
+              visibility: mapLibre3D ? "none" : "visible",
+            }}
             paint={{
               "circle-radius": 6,
               "circle-color": "#2563eb",
@@ -4032,6 +4191,71 @@ export function MapView() {
               "line-color": "#ef4444",
               "line-width": 3,
               "line-dasharray": [2, 2],
+            }}
+          />
+        </Source>
+        {/* Colonnes 3D des waypoints : montent à la hauteur exacte
+            de chaque point (visibles en 3D uniquement). */}
+        <Source id="waypoint-pillars" type="geojson" data={waypointPillarsGeo}>
+          <Layer
+            id="waypoint-pillars-extrusion"
+            type="fill-extrusion"
+            layout={{
+              visibility: mapLibre3D ? "visible" : "none",
+            }}
+            paint={{
+              "fill-extrusion-color": [
+                "case",
+                ["get", "selected"],
+                "#93c5fd",
+                "#3b82f6",
+              ],
+              "fill-extrusion-height": ["coalesce", ["get", "h"], 0],
+              "fill-extrusion-base": 0,
+              "fill-extrusion-opacity": 0.55,
+              "fill-extrusion-vertical-gradient": false,
+            }}
+          />
+        </Source>
+        {/* Rideau 3D du tracé : murs montant à l'altitude de vol
+            (visibles en 3D uniquement). */}
+        <Source
+          id="route-curtain-normal"
+          type="geojson"
+          data={routeCurtainGeo.normal}
+        >
+          <Layer
+            id="route-curtain-normal-extrusion"
+            type="fill-extrusion"
+            layout={{
+              visibility: mapLibre3D ? "visible" : "none",
+            }}
+            paint={{
+              "fill-extrusion-color": "#3b82f6",
+              "fill-extrusion-height": ["coalesce", ["get", "h"], 0],
+              "fill-extrusion-base": 0,
+              "fill-extrusion-opacity": 0.35,
+              "fill-extrusion-vertical-gradient": false,
+            }}
+          />
+        </Source>
+        <Source
+          id="route-curtain-warned"
+          type="geojson"
+          data={routeCurtainGeo.warned}
+        >
+          <Layer
+            id="route-curtain-warned-extrusion"
+            type="fill-extrusion"
+            layout={{
+              visibility: mapLibre3D ? "visible" : "none",
+            }}
+            paint={{
+              "fill-extrusion-color": "#ef4444",
+              "fill-extrusion-height": ["coalesce", ["get", "h"], 0],
+              "fill-extrusion-base": 0,
+              "fill-extrusion-opacity": 0.4,
+              "fill-extrusion-vertical-gradient": false,
             }}
           />
         </Source>
@@ -4195,6 +4419,7 @@ export function MapView() {
           />
         </Source>
         <MapLibre3DController active={mapLibre3D} mapRef={mapRef} />
+        <WaypointBadgeAltitudeController active={mapLibre3D} mapRef={mapRef} />
         <AirspaceOverlay />
 
         {/* 2D overlays and interaction adapted for MapLibre */}
@@ -4247,9 +4472,35 @@ export function MapView() {
               latitude={waypoint.latitude}
               anchor="center"
               draggable
-              onDragEnd={(e: any) =>
-                moveWaypoint(waypoint.index, e.lngLat.lat, e.lngLat.lng)
-              }
+              onDragEnd={(e: any) => {
+                // En 3D le contenu du marqueur flotte au-dessus du sol :
+                // l'utilisateur vise avec le rond, donc le curseur est en
+                // dessous de la cible. On remonte le point lâché d'autant
+                // pour un drop exact.
+                let { lat, lng } = e.lngLat;
+                try {
+                  const map = mapRef.current?.getMap?.();
+                  if (map && mapLibre3D) {
+                    const offsetPx = waypointAltitudeOffsetPx(
+                      map,
+                      lat,
+                      waypoint.height,
+                    );
+                    if (offsetPx > 0) {
+                      const point = map.project({ lng, lat });
+                      const adjusted = map.unproject({
+                        x: point.x,
+                        y: point.y - offsetPx,
+                      });
+                      lat = adjusted.lat;
+                      lng = adjusted.lng;
+                    }
+                  }
+                } catch {
+                  // repli : coordonnées brutes
+                }
+                moveWaypoint(waypoint.index, lat, lng);
+              }}
               onClick={(e: any) => {
                 e.originalEvent.stopPropagation();
                 selectWaypoint(
@@ -4262,6 +4513,7 @@ export function MapView() {
             >
               <div
                 title={`${waypoint.name}\nAlt: ${waypoint.height}m | Speed: ${waypoint.speed}m/s\nGimbal: ${waypoint.gimbalPitchAngle}°\n${waypoint.latitude.toFixed(6)}, ${waypoint.longitude.toFixed(6)}`}
+                data-wp-index={waypoint.index}
                 style={{
                   position: "relative",
                   width: 20,
@@ -4286,6 +4538,7 @@ export function MapView() {
                     tous les zooms, hors de la ligne de vol, contrasté sur
                     tous les fonds (plan comme satellite). */}
                 <div
+                  data-wp-badge="true"
                   style={{
                     position: "absolute",
                     bottom: 19,
@@ -4305,7 +4558,7 @@ export function MapView() {
                       : "0 1px 5px rgba(0,0,0,0.55)",
                   }}
                 >
-                  {i + 1}
+                  {i + 1} · {formatHeight(waypoint.height, unitSystem)}
                 </div>
               </div>
             </GLMarker>

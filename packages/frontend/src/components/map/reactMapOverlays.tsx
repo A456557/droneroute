@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useId } from "react";
+import React, { useEffect, useMemo, useId, useRef } from "react";
 import {
   Marker as GLMarker,
   Popup,
@@ -7,6 +7,7 @@ import {
 } from "react-map-gl/maplibre";
 import { buildingApi, type RnbBuilding } from "@/lib/api";
 import { haversineDistance, pointInPolygon } from "@/lib/geo";
+import { useMissionStore } from "@/store/missionStore";
 const haversine = haversineDistance;
 
 // Minimal SVG pin builder reused
@@ -365,6 +366,140 @@ export function MapLibre3DController({
       }
     };
   }, [active, mapRef]);
+
+  return null;
+}
+
+// Décalage vertical (px) d'un point à heightM au-dessus du sol en 3D.
+// Projection perspective exacte : un point haut proche de la caméra paraît
+// bien plus haut que sa taille linéaire, d'où la correction par la
+// profondeur (une projection linéaire tasse les points vers le sol).
+// Retourne 0 en 2D (pitch ~0) ou hauteur nulle.
+export function waypointAltitudeOffsetPx(
+  map: any,
+  latitude: number,
+  heightM: number,
+): number {
+  try {
+    const pitch = typeof map?.getPitch === "function" ? map.getPitch() : 0;
+    if (!map || typeof map.getZoom !== "function") return 0;
+    if (!(pitch >= 1) || !(heightM > 0)) return 0;
+    const zoom = map.getZoom();
+    const canvasHeight =
+      (typeof map.getCanvas === "function"
+        ? map.getCanvas()?.clientHeight
+        : 0) || 600;
+    const fov = (map.transform?.fov as number | undefined) ?? 0.6435;
+    const focalPx =
+      (map.transform?.cameraToCenterDistance as number | undefined) ??
+      (0.5 * canvasHeight) / Math.tan(fov / 2);
+    const pitchRad = (pitch * Math.PI) / 180;
+    const sinP = Math.sin(pitchRad);
+    const cosP = Math.max(Math.cos(pitchRad), 1e-3);
+    // Mètres par pixel au sol (tuiles 512 px).
+    const mpp =
+      (40075016.686 * Math.cos((latitude * Math.PI) / 180)) /
+      (512 * Math.pow(2, zoom));
+    const slantDepthM = (focalPx * mpp) / cosP;
+    const topDepthM = Math.max(
+      slantDepthM * 0.12,
+      slantDepthM - heightM * cosP,
+    );
+    return Math.max(0, (focalPx * heightM * sinP) / topDepthM);
+  } catch {
+    return 0;
+  }
+}
+
+// Fait flotter les marqueurs de waypoints (rond + étiquette) à leur
+// altitude en 3D. L'ancre lngLat reste au sol (drag & clic inchangés) ;
+// seul le contenu visuel monte, recalculé à chaque mouvement de caméra.
+// En 2D, tout retombe au sol.
+export function WaypointBadgeAltitudeController({
+  active,
+  mapRef,
+}: {
+  active: boolean;
+  mapRef: any;
+}) {
+  const waypoints = useMissionStore((s) => s.waypoints);
+  const waypointsRef = useRef(waypoints);
+  waypointsRef.current = waypoints;
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const resetAll = () => {
+      try {
+        const root = mapRef?.current?.getMap?.()?.getContainer?.() ?? undefined;
+        const scope: ParentNode = root ?? document;
+        scope
+          .querySelectorAll<HTMLElement>("[data-wp-index]")
+          .forEach((marker) => {
+            marker.style.transform = "";
+          });
+      } catch {
+        // DOM pas prêt
+      }
+    };
+
+    const apply = () => {
+      if (cancelled) return;
+      let map: any = null;
+      try {
+        map = mapRef?.current?.getMap ? mapRef.current.getMap() : null;
+      } catch {
+        map = null;
+      }
+      if (!map || typeof map.getZoom !== "function") {
+        timer = setTimeout(apply, 300);
+        return;
+      }
+      const attach = () => {
+        if (cancelled) return;
+        try {
+          map.off?.("move", apply);
+          map.on?.("move", apply);
+        } catch {
+          // écoute optionnelle
+        }
+      };
+      attach();
+
+      try {
+        const container: HTMLElement | null =
+          typeof map.getContainer === "function" ? map.getContainer() : null;
+        const scope: ParentNode = container ?? document;
+        const byIndex = new Map(waypointsRef.current.map((w) => [w.index, w]));
+        scope
+          .querySelectorAll<HTMLElement>("[data-wp-index]")
+          .forEach((marker) => {
+            const index = Number(marker.getAttribute("data-wp-index"));
+            const wp = byIndex.get(index);
+            const px =
+              wp && active
+                ? waypointAltitudeOffsetPx(map, wp.latitude, wp.height)
+                : 0;
+            marker.style.transform = px > 0 ? `translateY(${-px}px)` : "";
+          });
+      } catch {
+        timer = setTimeout(apply, 300);
+      }
+    };
+
+    apply();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      try {
+        mapRef?.current?.getMap?.()?.off?.("move", apply);
+      } catch {
+        // carte déjà démontée
+      }
+      resetAll();
+    };
+  }, [active, mapRef, waypoints]);
 
   return null;
 }
