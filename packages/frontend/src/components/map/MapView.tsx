@@ -4281,13 +4281,14 @@ export function MapView() {
                       : "0 1px 4px rgba(0,0,0,0.5)",
                   }}
                 />
-                {/* Numéro au-dessus du rond (et non dedans) : visible à
+                {/* Numéro collé au-dessus du rond (1px de recouvrement
+                    pour fusionner visuellement badge et point) : visible à
                     tous les zooms, hors de la ligne de vol, contrasté sur
                     tous les fonds (plan comme satellite). */}
                 <div
                   style={{
                     position: "absolute",
-                    bottom: 24,
+                    bottom: 19,
                     left: "50%",
                     transform: "translateX(-50%)",
                     background: "#3b82f6",
