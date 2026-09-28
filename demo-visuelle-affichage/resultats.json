@@ -1,0 +1,94 @@
+{
+  "results": [
+    {
+      "id": "01-street-2d",
+      "label": "Street + 2D",
+      "Street": "ACTIF",
+      "Satellite": "inactif",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "inactif"
+    },
+    {
+      "id": "02-satellite-2d",
+      "label": "Satellite + 2D",
+      "Street": "inactif",
+      "Satellite": "ACTIF",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "inactif"
+    },
+    {
+      "id": "03-satellite-3d",
+      "label": "Satellite + 3D",
+      "Street": "inactif",
+      "Satellite": "ACTIF",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "inactif"
+    },
+    {
+      "id": "04-street-3d",
+      "label": "Street + 3D",
+      "Street": "ACTIF",
+      "Satellite": "inactif",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "inactif"
+    },
+    {
+      "id": "05-street-3d-bat",
+      "label": "Street + 3D + Batiments",
+      "Street": "ACTIF",
+      "Satellite": "inactif",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "ACTIF"
+    },
+    {
+      "id": "06-street-2d-bat",
+      "label": "Street + 2D + Batiments",
+      "Street": "ACTIF",
+      "Satellite": "inactif",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "ACTIF"
+    },
+    {
+      "id": "07-satellite-2d-bat",
+      "label": "Satellite + 2D + Batiments",
+      "Street": "inactif",
+      "Satellite": "ACTIF",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "ACTIF"
+    },
+    {
+      "id": "08-satellite-3d-bat",
+      "label": "Satellite + 3D + Batiments",
+      "Street": "inactif",
+      "Satellite": "ACTIF",
+      "2D": "ACTIF",
+      "3D": "inactif",
+      "Batiments": "ACTIF"
+    }
+  ],
+  "tiles": {
+    "ok": 331,
+    "ko": 0,
+    "hosts": {
+      "tiles.openfreemap.org": {
+        "ok": 74,
+        "ko": 0
+      },
+      "data.geopf.fr": {
+        "ok": 215,
+        "ko": 0
+      },
+      "s3.amazonaws.com": {
+        "ok": 42,
+        "ko": 0
+      }
+    }
+  }
+}

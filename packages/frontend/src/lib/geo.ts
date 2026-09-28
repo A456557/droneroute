@@ -296,7 +296,9 @@ export interface AirspaceWarning {
  * Handles Polygon and MultiPolygon. GeoJSON coordinates are [lng, lat],
  * so we swap them to [lat, lng] to match our convention.
  */
-function extractPolygons(geometry: GeoJSON.Geometry): [number, number][][] {
+export function extractPolygons(
+  geometry: GeoJSON.Geometry,
+): [number, number][][] {
   const rings: [number, number][][] = [];
   if (geometry.type === "Polygon") {
     rings.push(
@@ -377,6 +379,39 @@ export function getAirspaceWarnings(
   }
 
   return Array.from(warnings.values());
+}
+
+// ── Statistiques de vol ──────────────────────────────────────
+
+/**
+ * Estimate total distance (m) and flight time (s) using per-segment
+ * speeds (waypoint speed or global speed when useGlobalSpeed is set).
+ */
+export function estimateFlightStats(
+  waypoints: {
+    latitude: number;
+    longitude: number;
+    speed: number;
+    useGlobalSpeed: boolean;
+  }[],
+  globalSpeed: number,
+): { distance: number; time: number } {
+  let distance = 0;
+  let time = 0;
+  for (let i = 1; i < waypoints.length; i++) {
+    const prev = waypoints[i - 1];
+    const curr = waypoints[i];
+    const segDist = haversineDistance(
+      prev.latitude,
+      prev.longitude,
+      curr.latitude,
+      curr.longitude,
+    );
+    const speed = curr.useGlobalSpeed ? globalSpeed : curr.speed;
+    distance += segDist;
+    time += speed > 0 ? segDist / speed : 0;
+  }
+  return { distance, time };
 }
 
 // ── RNB 3D extrusion ─────────────────────────────────────────

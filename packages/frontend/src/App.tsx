@@ -21,6 +21,7 @@ import {
   CircleHelp,
   Triangle,
   Shield,
+  ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,7 @@ import { SharedMissionPage } from "@/components/routes/SharedMissionPage";
 import { AdminPage } from "@/pages/AdminPage";
 import { ElevationGraph } from "@/components/mission/ElevationGraph";
 import { MissionAssistantPanel } from "@/components/mission/MissionAssistantPanel";
+import { RouteCheckPanel } from "@/components/mission/RouteCheckPanel";
 import { WarningsPanel } from "@/components/mission/WarningsPanel";
 import type { Warning } from "@/components/mission/WarningsPanel";
 import { AuthModal } from "@/components/auth/AuthModal";
@@ -47,15 +49,21 @@ import { useConfigStore } from "@/store/configStore";
 import { usePreferencesStore } from "@/store/preferencesStore";
 import { formatDistance } from "@/lib/units";
 import { useAirspaceStore } from "@/store/airspaceStore";
+import { isReportStale, useRouteCheckStore } from "@/store/routeCheckStore";
 import { api } from "@/lib/api";
-import { getObstacleWarnings, getAirspaceWarnings } from "@/lib/geo";
+import {
+  getObstacleWarnings,
+  getAirspaceWarnings,
+  estimateFlightStats,
+} from "@/lib/geo";
 
 type SidebarSection =
   | "waypoints"
   | "pois"
   | "obstacles"
   | "config"
-  | "assistant";
+  | "assistant"
+  | "routecheck";
 
 export default function App() {
   const {
@@ -84,6 +92,7 @@ export default function App() {
     obstacles: false,
     config: false,
     assistant: false,
+    routecheck: false,
   });
 
   const [saving, setSaving] = useState(false);
@@ -237,6 +246,25 @@ export default function App() {
   const handleExport = async () => {
     if (waypoints.length < 2) {
       toast.warning("Need at least 2 waypoints to export");
+      return;
+    }
+
+    // Garde d'export du contrôle du parcours (désactivée par défaut :
+    // sans elle, la politique d'export reste inchangée).
+    const routeCheck = useRouteCheckStore.getState();
+    if (
+      routeCheck.blockExport &&
+      routeCheck.report &&
+      !isReportStale(routeCheck.report) &&
+      routeCheck.report.globalStatus === "blocked"
+    ) {
+      const blocking = routeCheck.report.findings.filter(
+        (finding) =>
+          finding.severity === "error" && finding.status !== "ignored",
+      );
+      toast.error(
+        `Export refusé : ${blocking.length} constat(s) bloquant(s) sur la version actuelle. Corrigez le parcours ou ajustez les règles dans Route check.`,
+      );
       return;
     }
 
@@ -663,6 +691,27 @@ export default function App() {
               </div>
             )}
           </div>
+
+          <div className="border-l-2 border-emerald-500/70 bg-emerald-500/[0.03]">
+            <button
+              className="flex items-center gap-2 w-full px-3 py-2 text-xs font-semibold uppercase tracking-wider bg-emerald-500/10 hover:bg-emerald-500/15 text-emerald-300"
+              onClick={() => toggleSection("routecheck")}
+              title="Contrôler le parcours avant export"
+            >
+              {expandedSections.routecheck ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+              <ShieldCheck className="h-3 w-3" />
+              Route check
+            </button>
+            {expandedSections.routecheck && (
+              <div className="max-h-[40vh] overflow-y-auto section-expand">
+                <RouteCheckPanel />
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Elevation graph */}
@@ -842,52 +891,6 @@ export default function App() {
       <WelcomeDialog />
     </div>
   );
-}
-
-// Haversine distance between two points (meters)
-function haversine(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number,
-): number {
-  const R = 6371000;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-// Estimate total distance (m) and flight time (s) using per-segment speeds
-function estimateFlightStats(
-  waypoints: {
-    latitude: number;
-    longitude: number;
-    speed: number;
-    useGlobalSpeed: boolean;
-  }[],
-  globalSpeed: number,
-): { distance: number; time: number } {
-  let distance = 0;
-  let time = 0;
-  for (let i = 1; i < waypoints.length; i++) {
-    const prev = waypoints[i - 1];
-    const curr = waypoints[i];
-    const segDist = haversine(
-      prev.latitude,
-      prev.longitude,
-      curr.latitude,
-      curr.longitude,
-    );
-    const speed = curr.useGlobalSpeed ? globalSpeed : curr.speed;
-    distance += segDist;
-    time += speed > 0 ? segDist / speed : 0;
-  }
-  return { distance, time };
 }
 
 // Format seconds into human-readable duration

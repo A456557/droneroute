@@ -210,9 +210,24 @@ export function MissionAssistantPanel() {
                   className="rounded-md border border-border/70 bg-background/40 px-2.5 py-2"
                 >
                   <p className="font-medium text-foreground">{action.label}</p>
+                  {action.target ? (
+                    <p className="mt-1 text-xs text-sky-300">
+                      Cible : {action.target}
+                    </p>
+                  ) : null}
                   <p className="text-muted-foreground mt-1 leading-relaxed">
                     {action.detail}
                   </p>
+                  {action.justification ? (
+                    <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+                      Pourquoi : {action.justification}
+                    </p>
+                  ) : null}
+                  {action.dataUsed && action.dataUsed.length > 0 ? (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Données : {action.dataUsed.join(", ")}
+                    </p>
+                  ) : null}
                 </div>
               ))}
             </div>

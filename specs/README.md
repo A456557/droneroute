@@ -5,6 +5,7 @@ Everything DroneRoute can do, explained in plain language.
 ## Contents
 
 - [Mission planning](mission-planning.md) — place and configure waypoints for your drone flight
+- [Route check](route-check.md) — control the current route before export, with a versioned report
 - [Building photogrammetry mission planning](building-photogrammetry-mission-planning.md) — generate deterministic facade, roof, and oblique capture waypoints around a building
 - [Points of interest](points-of-interest.md) — mark targets on the map and aim the camera automatically
 - [Templates](templates.md) — generate common flight patterns with a few clicks

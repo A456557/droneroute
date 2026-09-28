@@ -21,6 +21,7 @@ import {
 } from "./reactMapOverlays";
 import {
   setFacadeContextProvider,
+  setMapCaptureProvider,
   useRouteCheckStore,
 } from "@/store/routeCheckStore";
 import type { FacadeCheckContext } from "@/lib/routeCheck";
@@ -3619,6 +3620,23 @@ export function MapView() {
   // change the hook order and crash React.
   const mapRef = useRef<any>(null);
 
+  // Fournit la capture de la vue au contrôle du parcours (analyse
+  // visuelle IA). Le canvas est préservé via preserveDrawingBuffer.
+  useEffect(() => {
+    setMapCaptureProvider(() => {
+      try {
+        const canvas = mapRef.current?.getMap?.()?.getCanvas?.();
+        if (!canvas || typeof canvas.toDataURL !== "function") return null;
+        return canvas.toDataURL("image/jpeg", 0.8);
+      } catch {
+        return null;
+      }
+    });
+    return () => {
+      setMapCaptureProvider(null);
+    };
+  }, []);
+
   // GeoJSON for route and points (used in the 2D open-source view)
   const routeGeo = useMemo(() => {
     return {
@@ -4254,6 +4272,9 @@ export function MapView() {
         // maplibre-gl v4 lacks GlobeControl required by react-map-gl v8
         // types (v5-only API); the runtime APIs we use are identical.
         mapLib={maplibregl as any}
+        // preserveDrawingBuffer : autorise la capture de la vue pour
+        // l'analyse visuelle IA (toDataURL fiable).
+        preserveDrawingBuffer
         mapStyle={mapTypeId === HYBRID_TYPE ? IGN_ORTHO_STYLE : IGN_PLAN_STYLE}
         // Fonds IGN plafonnés au zoom 19 : au-delà, les tuiles n'existent
         // pas et la carte affiche du vide (zones noires en zoom bâtiment).

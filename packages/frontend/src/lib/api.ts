@@ -125,6 +125,21 @@ export interface FacadeCopilotRecommendation {
 export interface MissionAssistantSuggestedAction {
   label: string;
   detail: string;
+  /** Cible localisée (ex. « waypoint 3 »), si fournie et validée. */
+  target?: string | null;
+  /** Justification adossée aux constats, si fournie et validée. */
+  justification?: string | null;
+  /** Données utilisées, si fournies et validées. */
+  dataUsed?: string[];
+}
+
+/** Constat déterministe transmis à l'IA (données nécessaires uniquement). */
+export interface RouteCheckAiFinding {
+  id: string;
+  severity: string;
+  label: string;
+  description: string;
+  target: string;
 }
 
 export type MissionAssistantTemplateMode =
@@ -141,6 +156,8 @@ export interface MissionAssistantResponse {
   suggestedActions: MissionAssistantSuggestedAction[];
   source: "github-models" | "openai-compatible" | "ollama" | "local-rules";
   usedModel: string | null;
+  /** Vrai si le modèle a effectivement analysé la vue cartographique. */
+  imageAnalyzed?: boolean;
   terrain?: {
     groundMinM: number | null;
     groundMaxM: number | null;
@@ -321,6 +338,13 @@ export const missionAssistantApi = {
         restricted: number;
         names: string[];
       } | null;
+    } | null;
+    /** Capture JPEG/PNG de la carte (dataURL) pour analyse visuelle. */
+    mapImage?: string | null;
+    /** Contexte du contrôle du parcours (constats déterministes). */
+    routeCheck?: {
+      versionHash: string;
+      findings: RouteCheckAiFinding[];
     } | null;
   }) => api.post<MissionAssistantResponse>("/assistant/mission", body),
 };

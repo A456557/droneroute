@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { assistantRoutes } from "./assistant.js";
 
 const app = express();
-app.use(express.json());
+// Même limite que la prod (index.ts) pour laisser passer les dataURL image.
+app.use(express.json({ limit: "50mb" }));
 app.use("/api/assistant", assistantRoutes);
 
 describe("POST /api/assistant/mission", () => {
@@ -185,5 +186,56 @@ describe("POST /api/assistant/mission", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("prompt must be a non-empty string");
+  });
+
+  it("rejects a non-image mapImage dataURL", async () => {
+    const res = await request(app).post("/api/assistant/mission").send({
+      prompt: "Contrôle le parcours",
+      waypoints: [],
+      mapImage: "data:image/gif;base64,R0lGODdhAQABAIAAAP",
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe(
+      "mapImage must be a JPEG/PNG dataURL under 1.5 MB",
+    );
+  });
+
+  it("rejects an oversized mapImage", async () => {
+    const res = await request(app)
+      .post("/api/assistant/mission")
+      .send({
+        prompt: "Contrôle le parcours",
+        waypoints: [],
+        mapImage: `data:image/jpeg;base64,${"a".repeat(1_500_001)}`,
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("falls back to local rules with imageAnalyzed false when no provider is configured", async () => {
+    const res = await request(app)
+      .post("/api/assistant/mission")
+      .send({
+        prompt: "Contrôle le parcours",
+        waypoints: [],
+        mapImage: "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+        routeCheck: {
+          versionHash: "stale-hash",
+          findings: [
+            {
+              id: "R-01",
+              severity: "info",
+              label: "Trace",
+              description: "Trace vide.",
+              target: "parcours",
+            },
+          ],
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe("local-rules");
+    expect(res.body.imageAnalyzed).toBe(false);
   });
 });

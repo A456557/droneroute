@@ -7,6 +7,9 @@ import { DEFAULT_WAYPOINT } from "@droneroute/shared";
 
 // ── Helpers ──────────────────────────────────────────────
 
+/** Longueur minimale d'un tracé pencil pour générer une mission (m). */
+export const MIN_PENCIL_PATH_LENGTH_M = 10;
+
 /** Move a lat/lng point by a distance (meters) and bearing (degrees, 0=N) */
 function destinationPoint(
   lat: number,

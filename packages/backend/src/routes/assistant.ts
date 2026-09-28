@@ -23,7 +23,67 @@ type MissionAssistantRequest = {
   obstacles?: unknown;
   terrain?: unknown;
   site?: unknown;
+  /** Capture de la carte (dataURL JPEG/PNG) pour analyse visuelle. */
+  mapImage?: unknown;
+  /** Contexte du contrôle du parcours (constats déterministes). */
+  routeCheck?: unknown;
 };
+
+export type RouteCheckAiFinding = {
+  id: string;
+  severity: string;
+  label: string;
+  description: string;
+  target: string;
+};
+
+export type RouteCheckAiContext = {
+  versionHash: string;
+  findings: RouteCheckAiFinding[];
+};
+
+/** 1,5 Mo de dataURL : au-delà, 400 (pas de secret, juste du poids). */
+export const MAX_MAP_IMAGE_LENGTH = 1_500_000;
+
+export function normalizeMapImage(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  if (value.length > MAX_MAP_IMAGE_LENGTH) return null;
+  if (!/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(value)) {
+    return null;
+  }
+  return value;
+}
+
+export function normalizeRouteCheckContext(
+  value: unknown,
+): RouteCheckAiContext | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.versionHash !== "string") return null;
+  if (!Array.isArray(record.findings)) return null;
+  const findings: RouteCheckAiFinding[] = [];
+  for (const item of record.findings.slice(0, 50)) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Record<string, unknown>;
+    if (
+      typeof entry.id !== "string" ||
+      typeof entry.severity !== "string" ||
+      typeof entry.label !== "string" ||
+      typeof entry.description !== "string" ||
+      typeof entry.target !== "string"
+    ) {
+      continue;
+    }
+    findings.push({
+      id: entry.id,
+      severity: entry.severity,
+      label: entry.label,
+      description: entry.description,
+      target: entry.target,
+    });
+  }
+  return { versionHash: record.versionHash, findings };
+}
 
 export type TerrainSnapshot = {
   groundMinM: number | null;
@@ -64,6 +124,9 @@ export type SiteSnapshot = {
 type SuggestedAction = {
   label: string;
   detail: string;
+  target?: string | null;
+  justification?: string | null;
+  dataUsed?: string[];
 };
 
 type MissionAssistantResponse = {
@@ -75,6 +138,8 @@ type MissionAssistantResponse = {
   usedModel: string;
   terrain?: TerrainSnapshot | null;
   site?: SiteSnapshot | null;
+  /** Vrai si le modèle a effectivement analysé la vue cartographique. */
+  imageAnalyzed: boolean;
 };
 
 type MissionStats = {
@@ -683,6 +748,8 @@ assistantRoutes.post("/mission", async (req, res) => {
     obstacles: rawObstacles,
     terrain: rawTerrain,
     site: rawSite,
+    mapImage: rawMapImage,
+    routeCheck: rawRouteCheck,
   } = (req.body ?? {}) as MissionAssistantRequest;
 
   if (typeof prompt !== "string" || prompt.trim().length < 3) {
@@ -713,6 +780,19 @@ assistantRoutes.post("/mission", async (req, res) => {
   const profile = resolveMissionProfile(templateMode, focus);
   const terrain = normalizeTerrainSnapshot(rawTerrain);
   const site = normalizeSiteSnapshot(rawSite);
+  // Image trop lourde ou mal formée => 400 explicite, sans persistance.
+  if (
+    rawMapImage !== undefined &&
+    rawMapImage !== null &&
+    normalizeMapImage(rawMapImage) === null
+  ) {
+    res.status(400).json({
+      error: "mapImage must be a JPEG/PNG dataURL under 1.5 MB",
+    });
+    return;
+  }
+  const mapImage = normalizeMapImage(rawMapImage);
+  const routeCheck = normalizeRouteCheckContext(rawRouteCheck);
 
   const draftResponse = {
     answer: buildAnswer(
@@ -746,6 +826,7 @@ assistantRoutes.post("/mission", async (req, res) => {
       focus,
       profile,
     ),
+    imageAnalyzed: false,
   };
 
   try {
@@ -756,6 +837,8 @@ assistantRoutes.post("/mission", async (req, res) => {
         templateMode,
         profile,
         focus,
+        mapImage,
+        routeCheck,
         stats: {
           waypointCount: stats.waypointCount,
           poiCount: stats.poiCount,
@@ -784,6 +867,7 @@ assistantRoutes.post("/mission", async (req, res) => {
         ...draftResponse,
         source: "local-rules",
         usedModel: "regles-locales",
+        imageAnalyzed: false,
         terrain,
         site,
       });
