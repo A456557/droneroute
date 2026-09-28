@@ -43,13 +43,25 @@ vi.mock("@/lib/terrain", async (importOriginal) => {
   };
 });
 
+vi.mock("@/lib/site", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/site")>();
+  return {
+    ...original,
+    siteApi: {
+      summary: vi.fn(),
+    },
+  };
+});
+
 import { missionAssistantApi } from "@/lib/api";
 import { terrainApi } from "@/lib/terrain";
+import { siteApi } from "@/lib/site";
 
 const analyzeMock = missionAssistantApi.analyzeMission as unknown as ReturnType<
   typeof vi.fn
 >;
 const profileMock = terrainApi.profile as unknown as ReturnType<typeof vi.fn>;
+const summaryMock = siteApi.summary as unknown as ReturnType<typeof vi.fn>;
 
 function makeWaypoint(overrides: Partial<Waypoint> = {}): Waypoint {
   return {
@@ -120,6 +132,7 @@ beforeEach(() => {
     lastError: null,
   });
   useMissionStore.getState().clearMission();
+  useMissionStore.setState({ templateMode: null });
   profileMock.mockRejectedValue(new Error("MNT injoignable"));
 });
 
@@ -257,6 +270,54 @@ describe("parcelle cadastrale du scan façade (R-11)", () => {
       baseInput({ templateMode: "facade", facade: { ...facadeBase } }),
     );
     expect(findings.some((f) => f.checkId === "R-11")).toBe(false);
+  });
+});
+
+describe("parcelle résolue au contrôle (R-11 + IA)", () => {
+  it("résout la parcelle au centroïde pour une mission façade sans contexte", async () => {
+    summaryMock.mockResolvedValue({
+      parcelle: {
+        commune: "Test",
+        codeInsee: null,
+        section: "A",
+        numero: "1",
+        contenanceM2: null,
+        idu: null,
+        polygon: [
+          [43.449, 1.399],
+          [43.449, 1.403],
+          [43.453, 1.403],
+          [43.453, 1.399],
+        ],
+      },
+    });
+    analyzeMock.mockResolvedValue({
+      answer: "Analyse.",
+      bullets: [],
+      warnings: [],
+      suggestedActions: [],
+      source: "test",
+      usedModel: "test",
+    });
+    const mission = useMissionStore.getState();
+    mission.loadMission({
+      name: "Test",
+      config: makeConfig(),
+      waypoints: [
+        makeWaypoint({ index: 0, latitude: 43.45, longitude: 1.4 }),
+        makeWaypoint({ index: 1, latitude: 43.46, longitude: 1.41 }),
+      ],
+    });
+    useMissionStore.setState({ templateMode: "facade" });
+    await useRouteCheckStore.getState().runCheck();
+    const report = useRouteCheckStore.getState().report;
+    expect(summaryMock).toHaveBeenCalledOnce();
+    const finding = report?.findings.find((f) => f.checkId === "R-11");
+    expect(finding?.severity).toBe("warning");
+    // L'IA reçoit le constat R-11 avec la consigne parcelle explicite.
+    const prompt = analyzeMock.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain("R-11");
+    expect(prompt).toContain("parcelle cadastrale");
   });
 });
 

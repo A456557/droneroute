@@ -21,6 +21,7 @@ import { useMissionStore } from "@/store/missionStore";
 import { useAirspaceStore } from "@/store/airspaceStore";
 import { missionAssistantApi, type MissionAssistantResponse } from "@/lib/api";
 import { terrainApi } from "@/lib/terrain";
+import { formatParcelLabel, normalizeParcelPolygon, siteApi } from "@/lib/site";
 
 /** Contexte façade fourni par MapView (état local non stocké). */
 export type FacadeContextProvider = () => FacadeCheckContext | null;
@@ -242,10 +243,15 @@ async function runAiAnalysis(
           )
           .join("\n")
       : "Aucun constat.";
+  // Consigne parcelle : l'IA doit reprendre explicitement le constat
+  // R-11 (aucun waypoint hors limite cadastrale sans le signaler).
+  const parcelNote = findings.some((f) => f.checkId === "R-11")
+    ? " Vérifie en particulier que chaque waypoint reste dans la parcelle cadastrale (constat R-11) : tout dépassement des limites doit être signalé comme survol potentiel de parcelle voisine."
+    : "";
   const prompt =
     `Contrôle d'un parcours drone (${input.waypoints.length} waypoints, ` +
     `${Math.round(summary.distanceM)} m). Constats déterministes à expliquer :\n${findingsText}\n` +
-    `Trajet : ${waypointText}.`;
+    `Trajet : ${waypointText}.${parcelNote}`;
   const mapImage = await captureMapImage();
   try {
     const response = await missionAssistantApi.analyzeMission({
@@ -363,13 +369,59 @@ export const useRouteCheckStore = create<RouteCheckState>((set, get) => ({
         terrain = null;
       }
 
+      // Parcelle cadastrale (R-11 + analyse IA) : celle du contexte si
+      // connue, sinon résolue au centroïde pour les missions façade
+      // (mission chargée sans bâtiment sélectionné). Échec silencieux :
+      // le contrôle continue sans R-11.
+      let facadeWithParcel = facade;
+      if (facade || mission.templateMode === "facade") {
+        const known = normalizeParcelPolygon(facade?.parcelPolygon);
+        if (known) {
+          facadeWithParcel = {
+            ...(facade as FacadeCheckContext),
+            parcelPolygon: known,
+          };
+        } else {
+          try {
+            const lats = mission.waypoints.map((wp) => wp.latitude);
+            const lons = mission.waypoints.map((wp) => wp.longitude);
+            const summary = await siteApi.summary([
+              {
+                lat: lats.reduce((s, v) => s + v, 0) / lats.length,
+                lon: lons.reduce((s, v) => s + v, 0) / lons.length,
+              },
+            ]);
+            const polygon = normalizeParcelPolygon(summary.parcelle?.polygon);
+            if (polygon) {
+              facadeWithParcel = {
+                active: true,
+                templateMode: "facade",
+                buildingRnbId: null,
+                buildingHeightM: null,
+                heightSource: null,
+                segmentId: null,
+                segmentLengthM: null,
+                distanceM: null,
+                numRows: null,
+                numColumns: null,
+                ...facade,
+                parcelPolygon: polygon,
+                parcelLabel: formatParcelLabel(summary.parcelle),
+              };
+            }
+          } catch {
+            // Sans parcelle, le contrôle continue sans R-11.
+          }
+        }
+      }
+
       const input: RouteCheckInput = {
         waypoints: mission.waypoints,
         pois: mission.pois,
         obstacles: mission.obstacles,
         config: mission.config,
         templateMode: mission.templateMode,
-        facade,
+        facade: facadeWithParcel,
         airspace: { enabled: airspace.enabled, zones: airspace.zones },
         terrain,
       };

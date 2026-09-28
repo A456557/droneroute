@@ -67,6 +67,37 @@ export const siteApi = {
     api.post<SiteSummary>("/site/summary", { points }),
 };
 
+/** Anneau parcelle valide (≥ 3 sommets finis), sinon null. */
+export function normalizeParcelPolygon(
+  polygon: unknown,
+): Array<[number, number]> | null {
+  if (!Array.isArray(polygon)) return null;
+  const ring = polygon.filter(
+    (pt): pt is [number, number] =>
+      Array.isArray(pt) &&
+      pt.length >= 2 &&
+      Number.isFinite(pt[0]) &&
+      Number.isFinite(pt[1]),
+  );
+  return ring.length >= 3 ? ring : null;
+}
+
+/** Libellé court "commune section X n°Y", null si rien d'exploitable. */
+export function formatParcelLabel(
+  parcelle: {
+    commune: string | null;
+    section: string | null;
+    numero: string | null;
+  } | null,
+): string | null {
+  if (!parcelle) return null;
+  if (!parcelle.commune && !parcelle.section && !parcelle.numero) return null;
+  return (
+    `${parcelle.commune ?? ""} section ${parcelle.section ?? "?"} n°${parcelle.numero ?? "?"}`.trim() ||
+    null
+  );
+}
+
 /** Réduit le résumé complet au snapshot envoyé à l'IA. */
 export function buildSiteSnapshot(summary: SiteSummary): SiteSnapshot {
   return {

@@ -65,4 +65,7 @@ Check the current route before exporting it, without changing the mission.
   d'échec bloquant".
 - R-11 checks that a facade scan stays inside the building's cadastral
   parcel (2 m edge margin): waypoints outside are a warning (possible
-  neighboring-parcel overflight), never blocking.
+  neighboring-parcel overflight), never blocking. The parcel is resolved
+  automatically at check time (mission centroid) when the facade context
+  has none, so the finding — and the AI explanation, which must call out
+  every overstep explicitly — always covers the parcel check.

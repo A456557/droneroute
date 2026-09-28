@@ -66,7 +66,7 @@ import {
   type PencilParams,
   type TemplateResult,
 } from "@/lib/templates";
-import { siteApi } from "@/lib/site";
+import { formatParcelLabel, normalizeParcelPolygon, siteApi } from "@/lib/site";
 import { MapToolbar } from "./MapToolbar";
 import { TemplateConfigPanel } from "./TemplateConfigPanel";
 import { AirspaceOverlay } from "./AirspaceOverlay";
@@ -2807,21 +2807,12 @@ export function MapView() {
       .summary([{ lat: centroid.lat, lon: centroid.lng }])
       .then((summary) => {
         if (cancelled) return;
-        const parcelle = summary.parcelle;
-        const polygon = Array.isArray(parcelle?.polygon)
-          ? parcelle.polygon.filter(
-              (pt): pt is [number, number] =>
-                Array.isArray(pt) &&
-                Number.isFinite(pt[0]) &&
-                Number.isFinite(pt[1]),
-            )
-          : [];
-        if (polygon.length < 3) return;
-        const label =
-          parcelle?.commune || parcelle?.section || parcelle?.numero
-            ? `${parcelle?.commune ?? ""} section ${parcelle?.section ?? "?"} n°${parcelle?.numero ?? "?"}`.trim()
-            : null;
-        setFacadeParcel({ polygon, label });
+        const polygon = normalizeParcelPolygon(summary.parcelle?.polygon);
+        if (!polygon) return;
+        setFacadeParcel({
+          polygon,
+          label: formatParcelLabel(summary.parcelle),
+        });
       })
       .catch(() => {
         // Sans parcelle, le vol façade reste possible (sans contrainte).

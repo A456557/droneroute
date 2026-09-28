@@ -286,6 +286,7 @@ function buildRouteCheckSkill(
   return [
     `Route-check analyst skill (Contrôle du parcours), version ${routeCheck.versionHash} :`,
     "1. Explique chaque constat déterministe ci-dessous en langage clair, sans jamais le contredire.",
+    "1b. Limites cadastrales : vérifie en particulier que chaque waypoint reste dans la parcelle (constat R-11). Tout dépassement doit être signalé explicitement comme survol potentiel de parcelle voisine ; un constat R-11 favorable doit être confirmé, jamais ignoré.",
     imageProvided
       ? "2. Vue cartographique fournie : décris ce que tu y vois d'utile (tracé, relief, obstacles ou bâtiments visibles) et signale les incohérences visuelles POTENTIELLES (ex. waypoint semblant posé sur un bâtiment). Marque-les explicitement comme incertaines."
       : "2. Aucune vue cartographique fournie : n'invente aucun élément visuel, explicite ce manque.",
