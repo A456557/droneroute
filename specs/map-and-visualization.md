@@ -51,6 +51,17 @@ The map is the central workspace. Everything you do — placing waypoints, POIs,
 - The geocoding search box collapses to an icon when not in use to save space.
 - A Mapbox access token is required. Self-hosted instances must set `MAPBOX_TOKEN` in their `.env` file.
 
+## Parcelles cadastrales
+
+- Toggle **Cadastre** with the bottom-left button (on by default).
+- Overlays the open-data cadastral parcels (PCI, DGFiP via Géoplateforme
+  WMS-R, no key, Licence Ouverte) on both street and satellite views —
+  black outlines on street, white on satellite.
+- Tiles are requested only from zoom 14 (~1:25 000); below that the layer
+  stays hidden to avoid useless requests.
+- Same source family the site panel already uses for the parcel lookup
+  (APICarto cadastre), so the map and the parcel sheet agree.
+
 ## Airspace restriction zones
 
 You can overlay airspace restriction zones on the map to check for drone no-fly areas:

@@ -300,6 +300,18 @@ const HYBRID_TYPE = "hybrid";
 // chaque render, avec un flash noir pendant le rechargement des tuiles).
 const IGN_ATTRIBUTION =
   "© IGN – Géoplateforme | Licence Ouverte 2.0 | © OpenStreetMap contributors";
+// Parcelles cadastrales (PCI DGFiP via Géoplateforme WMS-R, sans clé,
+// Licence Ouverte) : https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetCapabilities
+// Styles testés : bdparcellaire (noir, fond clair) et bdparcellaire_b
+// (blanc, fond satellite). Affichage à partir du zoom 14 (~1:25 000).
+const CADASTRE_WMS_LAYER = "CADASTRALPARCELS.PARCELS";
+const CADASTRE_MIN_ZOOM = 14;
+const CADASTRE_ATTRIBUTION = `${IGN_ATTRIBUTION} | © DGFiP (PCI)`;
+function cadastreWmsTiles(wmsStyle: string): string[] {
+  return [
+    `https://data.geopf.fr/wms-r/wms?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=${CADASTRE_WMS_LAYER}&STYLES=${wmsStyle}&FORMAT=image/png&TRANSPARENT=TRUE&CRS=EPSG:3857&WIDTH=256&HEIGHT=256&BBOX={bbox-epsg-3857}`,
+  ];
+}
 const IGN_PLAN_STYLE = {
   version: 8,
   sources: {
@@ -2237,6 +2249,8 @@ type MapViewChromeProps = {
   onSelect3D: () => void;
   showRnbLayer: boolean;
   onToggleRnbLayer: () => void;
+  showCadastre: boolean;
+  onToggleCadastre: () => void;
   showRnbEmptyHint: boolean;
   scanOptionEnabled: boolean;
   scanOptionDescription: string;
@@ -2255,6 +2269,8 @@ function MapViewChrome({
   onSelect3D,
   showRnbLayer,
   onToggleRnbLayer,
+  showCadastre,
+  onToggleCadastre,
   showRnbEmptyHint,
   scanOptionEnabled,
   scanOptionDescription,
@@ -2295,6 +2311,14 @@ function MapViewChrome({
           onClick={onToggleRnbLayer}
         >
           Contour de bâtiment
+        </button>
+        <div className="w-px bg-border mx-1" />
+        <button
+          className={`px-2 py-1 text-xs rounded ${showCadastre ? "bg-primary text-primary-foreground" : "bg-background/90 text-foreground border border-border"}`}
+          onClick={onToggleCadastre}
+          title="Parcelles cadastrales (PCI, open data)"
+        >
+          Cadastre
         </button>
       </div>
 
@@ -2600,6 +2624,9 @@ export function MapView() {
   const [facadeRecommendationBusy, setFacadeRecommendationBusy] =
     useState(false);
   const [showRnbLayer, setShowRnbLayer] = useState(false);
+  // Parcelles cadastrales (PCI open data) : actives par défaut, rendues
+  // seulement à partir du zoom 14 pour limiter les requêtes WMS.
+  const [showCadastre, setShowCadastre] = useState(true);
   const [rnbBuildings, setRnbBuildings] = useState<RnbBuilding[]>([]);
   const [selectedRnbBuilding, setSelectedRnbBuilding] =
     useState<SelectedRnbBuilding | null>(null);
@@ -4281,6 +4308,29 @@ export function MapView() {
         maxZoom={19}
         style={{ width: "100%", height: "100%" }}
       >
+        {/* Parcelles cadastrales (PCI open data, WMS-R Géoplateforme sans
+            clé) : style noir sur plan, blanc sur satellite, requêtes
+            seulement à partir du zoom 14. Sous le tracé mission. */}
+        {showCadastre && (
+          <Source
+            id={`cadastre-pci-${mapTypeId === HYBRID_TYPE ? "sat" : "plan"}`}
+            type="raster"
+            tiles={cadastreWmsTiles(
+              mapTypeId === HYBRID_TYPE ? "bdparcellaire_b" : "bdparcellaire",
+            )}
+            tileSize={256}
+            minzoom={CADASTRE_MIN_ZOOM}
+            maxzoom={19}
+            attribution={CADASTRE_ATTRIBUTION}
+          >
+            <Layer
+              id="cadastre-pci-parcelles"
+              type="raster"
+              minzoom={CADASTRE_MIN_ZOOM}
+              paint={{ "raster-opacity": 0.85 }}
+            />
+          </Source>
+        )}
         <Source id="route" type="geojson" data={routeGeo}>
           <Layer
             id="route-line"
@@ -5168,6 +5218,8 @@ export function MapView() {
         onSelect3D={handleSelect3D}
         showRnbLayer={showRnbLayer}
         onToggleRnbLayer={() => setShowRnbLayer((value) => !value)}
+        showCadastre={showCadastre}
+        onToggleCadastre={() => setShowCadastre((value) => !value)}
         showRnbEmptyHint={showRnbLayer && rnbBuildings.length === 0}
         scanOptionEnabled={selectedRnbBuilding != null}
         scanOptionDescription={
