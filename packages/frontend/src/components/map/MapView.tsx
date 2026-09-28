@@ -19,6 +19,11 @@ import {
   WaypointBadgeAltitudeController,
   waypointAltitudeOffsetPx,
 } from "./reactMapOverlays";
+import {
+  setFacadeContextProvider,
+  useRouteCheckStore,
+} from "@/store/routeCheckStore";
+import type { FacadeCheckContext } from "@/lib/routeCheck";
 import { toast } from "sonner";
 import { useMissionStore } from "@/store/missionStore";
 import { useConfigStore } from "@/store/configStore";
@@ -52,6 +57,7 @@ import {
   generateOrbit,
   generatePencil,
   pathLength,
+  MIN_PENCIL_PATH_LENGTH_M,
   type FacadeParams,
   type GridParams,
   type OrbitParams,
@@ -282,7 +288,6 @@ type BuildingDetectionCacheEntry = {
   cachedAt: number;
 };
 
-const MIN_PENCIL_PATH_LENGTH_M = 10;
 const ROADMAP_TYPE = "roadmap";
 const HYBRID_TYPE = "hybrid";
 // Fonds 100% open-source (Licence Ouverte 2.0, sans clé) :
@@ -325,7 +330,7 @@ const IGN_ORTHO_STYLE = {
   layers: [{ id: "bd-ortho-raster", type: "raster", source: "bd-ortho" }],
 } as any;
 const RECONSTRUCTION_DEMO_QUERY = "facade-reconstruction";
-const BUILDING_DETECTION_CACHE_KEY = "droneroute-building-detection-cache-v1";
+const BUILDING_DETECTION_CACHE_KEY = "droneroute-building-detection-cache-v2";
 const BUILDING_DETECTION_CACHE_MAX_ENTRIES = 12;
 const BUILDING_DETECTION_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 6;
 const RECONSTRUCTION_DEMO_PRESET = {
@@ -375,9 +380,17 @@ function loadBuildingDetectionCache(): BuildingDetectionCacheEntry[] {
         Number.isFinite(entry?.center?.lat) &&
         Number.isFinite(entry?.center?.lng) &&
         Number.isFinite(entry?.radiusM) &&
+        entry.radiusM > 0 &&
         Number.isFinite(entry?.cachedAt) &&
+        entry.cachedAt <= now &&
         now - entry.cachedAt < BUILDING_DETECTION_CACHE_MAX_AGE_MS &&
         entry.response?.building &&
+        Array.isArray(entry.response.building.footprint) &&
+        entry.response.building.footprint.length >= 3 &&
+        entry.response.building.footprint.every(
+          (point: LatLng) =>
+            Number.isFinite(point?.lat) && Number.isFinite(point?.lng),
+        ) &&
         Array.isArray(entry.response?.candidates)
       );
     });
@@ -429,13 +442,18 @@ function toDetectedBuildingFromRnb(
   building: RnbBuilding,
   bdTopoBuilding?: BdTopoMatchedBuilding | null,
 ): DetectedBuilding {
+  const bdTopoFootprint = bdTopoBuilding?.footprint;
   return {
     id: `rnb-${building.rnbId}`,
-    footprint: building.footprint,
-    centroid: building.point,
+    footprint:
+      bdTopoFootprint && normalizeFootprint(bdTopoFootprint).length >= 3
+        ? bdTopoFootprint
+        : building.footprint,
+    centroid: bdTopoBuilding?.centroid ?? building.centroid ?? building.point,
     confidence: 0.98,
     estimatedHeightM: bdTopoBuilding?.heightM ?? null,
-    heightSource: bdTopoBuilding?.heightM != null ? "osm-height" : null,
+    // La hauteur provient ici de BD TOPO, et non d'OSM.
+    heightSource: null,
     levels: bdTopoBuilding?.floorCount ?? null,
     roofShape: null,
     roofDirectionDeg: null,
@@ -448,19 +466,12 @@ function toDetectedBuildingFromRnb(
 function estimatedBuildingHeightM(
   building: RnbBuilding,
   bdTopoBuilding?: BdTopoMatchedBuilding | null,
-): number {
-  if (bdTopoBuilding?.heightM != null) {
-    return clamp(bdTopoBuilding.heightM, 12, 120);
-  }
-
-  const footprintAreaM2 = footprintAreaMeters(building.footprint);
-  const heuristicHeightM = clamp(
-    12 + Math.sqrt(Math.max(footprintAreaM2, 1)) * 0.32,
-    11,
-    48,
+): number | null {
+  const detected = toDetectedBuildingFromRnb(building, bdTopoBuilding);
+  return (
+    buildApproximateBuildingShell(detected, null, null)?.estimatedHeightM ??
+    null
   );
-
-  return clamp(heuristicHeightM, 12, 120);
 }
 
 function buildBuildingScanFacadeParams(
@@ -895,6 +906,40 @@ function footprintMetricsSummary(footprint: LatLng[]): {
   };
 }
 
+function distanceToFootprintMeters(point: LatLng, footprint: LatLng[]): number {
+  const vertices = normalizeFootprint(footprint);
+  if (vertices.length < 3) return Infinity;
+
+  let inside = false;
+  for (
+    let index = 0, previous = vertices.length - 1;
+    index < vertices.length;
+    previous = index, index += 1
+  ) {
+    const a = vertices[index];
+    const b = vertices[previous];
+    const crosses =
+      a.lat > point.lat !== b.lat > point.lat &&
+      point.lng <
+        ((b.lng - a.lng) * (point.lat - a.lat)) / (b.lat - a.lat) + a.lng;
+    if (crosses) inside = !inside;
+  }
+  if (inside) return 0;
+
+  let nearestM = Infinity;
+  for (let index = 0; index < vertices.length; index += 1) {
+    nearestM = Math.min(
+      nearestM,
+      pointToSegmentDistanceMeters(
+        point,
+        vertices[index],
+        vertices[(index + 1) % vertices.length],
+      ),
+    );
+  }
+  return nearestM;
+}
+
 function findCachedBuildingDetection(
   cacheRef: { current: BuildingDetectionCacheEntry[] },
   center: LatLng,
@@ -910,19 +955,30 @@ function findCachedBuildingDetection(
     saveBuildingDetectionCache(freshEntries);
   }
 
-  const maxDistanceM = Math.max(90, radiusM * 1.8);
   const bestMatch = freshEntries
     .map((entry) => ({
       entry,
-      distanceM: haversine(
+      centerDistanceM: haversine(
         entry.center.lat,
         entry.center.lng,
         center.lat,
         center.lng,
       ),
+      buildingDistanceM: distanceToFootprintMeters(
+        center,
+        entry.response.building.footprint,
+      ),
     }))
-    .filter((candidate) => candidate.distanceM <= maxDistanceM)
-    .sort((left, right) => left.distanceM - right.distanceM)[0];
+    .filter(
+      ({ entry, centerDistanceM, buildingDistanceM }) =>
+        centerDistanceM <= Math.min(radiusM, entry.radiusM) &&
+        buildingDistanceM <= Math.min(20, radiusM * 0.25),
+    )
+    .sort(
+      (left, right) =>
+        left.buildingDistanceM - right.buildingDistanceM ||
+        left.centerDistanceM - right.centerDistanceM,
+    )[0];
 
   return bestMatch?.entry.response ?? null;
 }
@@ -1342,6 +1398,8 @@ function buildReconstructionPresets(
 ): ReconstructionPresetOption[] {
   const footprint = normalizeFootprint(building.footprint);
   if (footprint.length < 3) return [];
+  const shell = buildApproximateBuildingShell(building, selectedSegment, null);
+  if (!shell) return [];
 
   const latitudes = footprint.map((point) => point.lat);
   const longitudes = footprint.map((point) => point.lng);
@@ -1352,9 +1410,9 @@ function buildReconstructionPresets(
   const spanNorthSouthM = haversine(minLat, minLng, maxLat, minLng);
   const spanEastWestM = haversine(minLat, minLng, minLat, maxLng);
   const footprintSizeM = Math.max(spanNorthSouthM, spanEastWestM, 18);
-  // Hauteur réelle (plus de plancher à 12 m qui gonflait les petits
-  // bâtiments : un bâtiment de 5 m donnait 34/40 m d'altitude).
-  const estimatedHeightM = clamp(building.estimatedHeightM ?? 24, 3, 120);
+  // Hauteur unifiée via la coque estimée (mesurée BD TOPO, étages ou
+  // heuristique) : les presets et le panneau partagent le même chiffre.
+  const estimatedHeightM = shell.estimatedHeightM;
   // Marges proportionnelles : identiques aux anciennes valeurs fixes pour
   // un bâtiment de ~24 m, réduites pour les petits bâtiments (avec des
   // planchers de sécurité : les alertes obstacles gardent le vol).
@@ -1912,9 +1970,13 @@ function buildApproximateBuildingShell(
       );
   const resolvedHeightSourceLabel =
     heightProvenance === "measured"
-      ? "Hauteur BD TOPO"
+      ? building.source === "rnb"
+        ? "Hauteur BD TOPO"
+        : heightSourceLabel(building, estimatedHeightM)
       : heightProvenance === "levels"
-        ? "Étages BD TOPO (× ~3 m)"
+        ? building.source === "rnb"
+          ? "Étages BD TOPO (× ~3 m)"
+          : heightSourceLabel(building, estimatedHeightM)
         : heightSourceLabel(building, heuristicHeightM);
   const roofStyleLabel = formatRoofStyleLabel(roofStyle);
   const streetViewLabel =
@@ -2557,6 +2619,7 @@ export function MapView() {
   const [mainMapViewport, setMainMapViewport] =
     useState<MainMapViewport | null>(null);
   const programmaticTemplateModeRef = useRef<TemplateMode>(null);
+  const facadeRequestIdRef = useRef(0);
   const reconstructionDemoLaunchedRef = useRef(false);
   const buildingDetectionCacheRef = useRef<BuildingDetectionCacheEntry[]>(
     loadBuildingDetectionCache(),
@@ -2819,14 +2882,23 @@ export function MapView() {
     );
   }, [selectedBdTopoBuilding, selectedRnbBuilding]);
 
+  const invalidateFacadeRequests = useCallback(() => {
+    const requestId = ++facadeRequestIdRef.current;
+    setFacadeAssistBusy(false);
+    setFacadeRecommendationBusy(false);
+    setFacadeRecommendation(null);
+    return requestId;
+  }, []);
+
   const clearSelectedBuildingUi = useCallback(() => {
+    invalidateFacadeRequests();
     setSelectedRnbBuilding(null);
     setShowSelectedRnbInfo(false);
     setShowSelectedBuildingScanPanel(false);
     setSelectedBdTopoBuilding(null);
     setSelectedBdnbBuilding(null);
     setSelectedRnbBuildingLoading(false);
-  }, []);
+  }, [invalidateFacadeRequests]);
 
   useEffect(() => {
     if (!showRnbLayer) {
@@ -3052,6 +3124,72 @@ export function MapView() {
     setDrawingVertices,
   ]);
 
+  // Contexte façade pour le contrôle du parcours (le store le tire via
+  // ce fournisseur au lieu de dupliquer l'état local de la carte).
+  useEffect(() => {
+    const selectedSegment =
+      facadeSegmentOptions.find(
+        (segment) => segment.id === selectedFacadeSegmentId,
+      ) ?? null;
+    const context: FacadeCheckContext = {
+      active:
+        templateMode === "facade" ||
+        showSelectedBuildingScanPanel ||
+        selectedRnbBuilding != null,
+      templateMode,
+      buildingRnbId: selectedRnbBuilding?.building.rnbId ?? null,
+      buildingHeightM: selectedBdTopoBuilding?.heightM ?? null,
+      heightSource: selectedBdTopoBuilding?.heightM != null ? "BD TOPO" : null,
+      segmentId: selectedSegment?.id ?? selectedFacadeSegmentId,
+      segmentLengthM: selectedSegment?.lengthM ?? null,
+      distanceM: facadeParams?.distanceM ?? null,
+      numRows: facadeParams?.numRows ?? null,
+      numColumns: facadeParams?.numColumns ?? null,
+      orbitRadiusM: orbitParams?.radiusM ?? null,
+      orbitNumPoints: orbitParams?.numPoints ?? null,
+      gridSpacingM: gridParams?.spacingM ?? null,
+      gridAltitudeM: gridParams?.altitude ?? null,
+      pencilPathLengthM: templateMode === "pencil" ? pathLength(rawPath) : null,
+    };
+    setFacadeContextProvider(() => context);
+    return () => {
+      setFacadeContextProvider(null);
+    };
+  }, [
+    templateMode,
+    showSelectedBuildingScanPanel,
+    selectedRnbBuilding,
+    selectedBdTopoBuilding,
+    selectedFacadeSegmentId,
+    facadeSegmentOptions,
+    facadeParams,
+    orbitParams,
+    gridParams,
+    rawPath,
+  ]);
+
+  // Recentrage demandé depuis un constat du contrôle (« Voir sur la carte »).
+  const checkFocusRequest = useRouteCheckStore((s) => s.focusRequest);
+  const clearCheckFocus = useRouteCheckStore((s) => s.clearFocus);
+  useEffect(() => {
+    if (!checkFocusRequest) return;
+    const map = mapRef.current?.getMap?.();
+    if (map && typeof map.flyTo === "function") {
+      try {
+        map.flyTo({
+          center: [checkFocusRequest.lng, checkFocusRequest.lat],
+          zoom: Math.max(map.getZoom?.() ?? 13, 15),
+        });
+      } catch {
+        // navigation impossible, la sélection ci-dessous suffit
+      }
+    }
+    if (checkFocusRequest.waypointIndex != null) {
+      selectWaypoint(checkFocusRequest.waypointIndex, "replace");
+    }
+    clearCheckFocus();
+  }, [checkFocusRequest, clearCheckFocus, selectWaypoint]);
+
   const applyFacadeScenario = useCallback(
     (
       building: DetectedBuilding,
@@ -3081,11 +3219,13 @@ export function MapView() {
     [],
   );
 
-  const refreshFacadeRecommendation = useCallback(
+  const fetchFacadeRecommendation = useCallback(
     async (
       building: DetectedBuilding,
       scenario: NonNullable<ReturnType<typeof buildFacadeScenario>>,
+      requestId: number,
     ) => {
+      const isCurrent = () => requestId === facadeRequestIdRef.current;
       setFacadeRecommendationBusy(true);
       try {
         const recommendation = await buildingApi.recommendFacadeScan({
@@ -3119,16 +3259,31 @@ export function MapView() {
             },
           })),
         });
+        if (!isCurrent()) return null;
         setFacadeRecommendation(recommendation);
         return recommendation;
       } catch {
+        if (!isCurrent()) return null;
         setFacadeRecommendation(null);
         return null;
       } finally {
-        setFacadeRecommendationBusy(false);
+        if (isCurrent()) {
+          setFacadeRecommendationBusy(false);
+        }
       }
     },
     [facadeObjective],
+  );
+
+  const refreshFacadeRecommendation = useCallback(
+    async (
+      building: DetectedBuilding,
+      scenario: NonNullable<ReturnType<typeof buildFacadeScenario>>,
+    ) => {
+      const requestId = invalidateFacadeRequests();
+      return fetchFacadeRecommendation(building, scenario, requestId);
+    },
+    [fetchFacadeRecommendation, invalidateFacadeRequests],
   );
 
   const runFacadeAssistFromParams = useCallback(
@@ -3144,6 +3299,8 @@ export function MapView() {
       const lng = (seedParams.point1[1] + seedParams.point2[1]) / 2;
       const queryCenter = { lat, lng };
       const radiusM = Math.max(60, seedParams.distanceM * 4);
+      const requestId = invalidateFacadeRequests();
+      const isCurrent = () => requestId === facadeRequestIdRef.current;
 
       setFacadeAssistBusy(true);
       setFacadeAssistMessage("Searching for the nearest building footprint...");
@@ -3182,15 +3339,20 @@ export function MapView() {
           }
         }
 
+        if (!isCurrent()) return null;
+
         const scenario = applyFacadeScenario(response.building, seedParams);
         if (!scenario) {
           throw new Error("Detected building has no usable facade segment");
         }
 
-        const recommendation = await refreshFacadeRecommendation(
+        const recommendation = await fetchFacadeRecommendation(
           response.building,
           scenario,
+          requestId,
         );
+
+        if (!isCurrent()) return null;
 
         if (options?.openBuildings3D) {
           setIs3D(true);
@@ -3207,6 +3369,7 @@ export function MapView() {
 
         return { response, scenario, recommendation };
       } catch (error) {
+        if (!isCurrent()) return null;
         setDetectedBuilding(null);
         setFacadeSegmentOptions([]);
         setSelectedFacadeSegmentId(null);
@@ -3220,10 +3383,12 @@ export function MapView() {
         );
         return null;
       } finally {
-        setFacadeAssistBusy(false);
+        if (isCurrent()) {
+          setFacadeAssistBusy(false);
+        }
       }
     },
-    [applyFacadeScenario, refreshFacadeRecommendation],
+    [applyFacadeScenario, fetchFacadeRecommendation, invalidateFacadeRequests],
   );
 
   const handleFacadeAssist = useCallback(async () => {
@@ -3514,11 +3679,13 @@ export function MapView() {
       rnbBuildings.map((b) => ({
         rnbId: b.rnbId,
         footprint: b.footprint,
+        // Repli 12 m si l'estimation est indisponible (les emprises de
+        // moins de 3 points sont de toute façon ignorées ci-dessous).
         heightM:
-          b.rnbId === selectedRnbBuilding?.building.rnbId &&
+          (b.rnbId === selectedRnbBuilding?.building.rnbId &&
           selectedBdTopoBuilding?.heightM != null
             ? estimatedBuildingHeightM(b, selectedBdTopoBuilding)
-            : estimatedBuildingHeightM(b, null),
+            : estimatedBuildingHeightM(b, null)) ?? 12,
       })),
     );
   }, [rnbBuildings, selectedRnbBuilding, selectedBdTopoBuilding]);
@@ -3859,6 +4026,30 @@ export function MapView() {
       })),
     } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
   }, [dragState, templateConfirmed, templateMode, rawPath, mapPreview]);
+
+  // Aperçu cyan d'une suggestion du contrôle du parcours (sans mutation).
+  const checkPreviewWaypoints = useRouteCheckStore((s) => s.previewWaypoints);
+  const checkPreviewGeo = useMemo(() => {
+    if (!checkPreviewWaypoints || checkPreviewWaypoints.length < 2) {
+      return null;
+    }
+    const lines: [number, number][][] = [];
+    checkPreviewWaypoints.slice(0, -1).forEach((waypoint, index) => {
+      const next = checkPreviewWaypoints[index + 1];
+      lines.push([
+        [waypoint.longitude, waypoint.latitude],
+        [next.longitude, next.latitude],
+      ]);
+    });
+    return {
+      type: "FeatureCollection",
+      features: lines.map((coordinates) => ({
+        type: "Feature",
+        properties: {},
+        geometry: { type: "LineString", coordinates },
+      })),
+    } as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+  }, [checkPreviewWaypoints]);
 
   // Transient UI callbacks shared by the map views (used by
   // MapTransientOverlays).
@@ -4334,6 +4525,21 @@ export function MapView() {
             }}
           />
         </Source>
+        {/* Aperçu d'une suggestion du contrôle : ne modifie pas la mission. */}
+        {checkPreviewGeo && (
+          <Source id="routecheck-preview" type="geojson" data={checkPreviewGeo}>
+            <Layer
+              id="routecheck-preview-line"
+              type="line"
+              paint={{
+                "line-color": "#22d3ee",
+                "line-width": 3,
+                "line-dasharray": [4, 2],
+                "line-opacity": 0.9,
+              }}
+            />
+          </Source>
+        )}
         {/* Extruded 3D buildings (OpenFreeMap vector tiles, visible in 3D).
             Hidden while the contour layer is on: mode contour = relief +
             tracés uniquement, sans bâtiments agrandis. */}
