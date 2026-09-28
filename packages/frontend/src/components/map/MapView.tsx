@@ -4400,8 +4400,13 @@ export function MapView() {
             clé) : style noir sur plan, blanc sur satellite, requêtes
             seulement à partir du zoom 14. Sous le tracé mission. */}
         {showCadastre && (
+          // Id stable exigé par react-map-gl (changer l'id lève "source id
+          // changed" et démonte toute la carte = écran noir). Le style
+          // noir/blanc suit le fond via `key`, qui remonte proprement la
+          // source au changement de fond.
           <Source
-            id={`cadastre-pci-${mapTypeId === HYBRID_TYPE ? "sat" : "plan"}`}
+            key={mapTypeId === HYBRID_TYPE ? "cadastre-sat" : "cadastre-plan"}
+            id="cadastre-pci"
             type="raster"
             tiles={cadastreWmsTiles(
               mapTypeId === HYBRID_TYPE ? "bdparcellaire_b" : "bdparcellaire",
