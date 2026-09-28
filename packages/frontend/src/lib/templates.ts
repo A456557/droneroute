@@ -197,6 +197,28 @@ export const DEFAULT_FACADE_PARAMS: Omit<FacadeParams, "point1" | "point2"> = {
   addPhotos: true,
 };
 
+/**
+ * Altitudes du scan façade d'un bâtiment de hauteur `heightM`.
+ * Proportionnelles au bâtiment (l'ancien calcul partait de 8 m fixe avec
+ * +8/+12 m de marge, donc un mur de 3 m était scanné entre 8 et 11 m) :
+ * départ près du sol, marge de toit pour voir la rive (~25 %, 2 à 8 m).
+ * Exemples : 3 m → 1..5 m ; 10 m → 2..13 m ; 30 m → 5..38 m.
+ */
+export function computeBuildingScanAltitudes(heightM: number): {
+  minAltitude: number;
+  maxAltitude: number;
+} {
+  const h = Number.isFinite(heightM) ? Math.max(0.5, heightM) : 10;
+  const clampNum = (v: number, lo: number, hi: number) =>
+    Math.min(hi, Math.max(lo, v));
+  const minAltitude = Math.round(clampNum(h * 0.2, 1, 5));
+  const roofMarginM = Math.round(clampNum(h * 0.25, 2, 8));
+  const maxAltitude = Math.round(
+    Math.min(100, Math.max(minAltitude + 1, h + roofMarginM)),
+  );
+  return { minAltitude, maxAltitude };
+}
+
 export const MISSION_PLANNER_VERTICAL_FACADE_PARAMS: Pick<
   FacadeParams,
   | "distanceM"

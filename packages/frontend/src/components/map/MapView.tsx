@@ -53,6 +53,7 @@ import {
   MISSION_PLANNER_3D_GRID_PARAMS,
   MISSION_PLANNER_VERTICAL_FACADE_PARAMS,
   DEFAULT_PENCIL_PARAMS,
+  computeBuildingScanAltitudes,
   generateFacade,
   generateGrid,
   generateOrbit,
@@ -506,6 +507,9 @@ function buildBuildingScanFacadeParams(
       ? Math.round(clamp(Math.ceil(segment.lengthM / 3.6), 8, 16))
       : Math.round(clamp(Math.ceil(segment.lengthM / 5), 5, 12));
 
+  // Altitudes proportionnelles au bâtiment (un mur de 3 m se scanne
+  // entre 1 et 5 m, pas entre 8 et 12 m).
+  const { minAltitude, maxAltitude } = computeBuildingScanAltitudes(heightM);
   return {
     ...DEFAULT_FACADE_PARAMS,
     ...(density === "dense"
@@ -514,10 +518,8 @@ function buildBuildingScanFacadeParams(
     point1: [segment.start.lat, segment.start.lng],
     point2: [segment.end.lat, segment.end.lng],
     distanceM,
-    minAltitude: 8,
-    maxAltitude: Math.round(
-      clamp(heightM + (density === "dense" ? 12 : 8), 1, 100),
-    ),
+    minAltitude,
+    maxAltitude,
     numRows,
     numColumns,
     addPhotos: true,

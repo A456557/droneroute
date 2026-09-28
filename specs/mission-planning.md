@@ -39,6 +39,9 @@ At each waypoint, you can tell the drone to:
 
 - A facade scan flies a zigzag grid parallel to the selected wall segment,
   at the configured standoff distance, facing the wall.
+- Scan altitudes scale with the building height (from near the ground to
+  the roofline plus a ~25% margin): a 3 m wall is scanned between 1 and
+  5 m, a 30 m building between 5 and 38 m (capped at 100 m).
 - When a building is selected, its cadastral parcel is fetched (APICarto,
   no key) and the flight plan is kept inside the parcel limits: any
   waypoint outside the parcel (with a 2 m edge margin) is pulled back

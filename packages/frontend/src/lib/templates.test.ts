@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeFacadeAltitudes, generateFacade } from "./templates";
+import {
+  computeBuildingScanAltitudes,
+  computeFacadeAltitudes,
+  generateFacade,
+} from "./templates";
 import { DEFAULT_FACADE_PARAMS } from "./templates";
 import type { FacadeParams } from "./templates";
 
@@ -21,6 +25,37 @@ describe("computeFacadeAltitudes", () => {
     expect(altitudes[0]).toBe(1);
     expect(altitudes[altitudes.length - 1]).toBe(20);
     expect(altitudes).toEqual([1, 6, 11, 15, 20]);
+  });
+});
+
+describe("computeBuildingScanAltitudes", () => {
+  it("scans a 3 m wall between 1 and 5 m, not 8 and 12 m", () => {
+    expect(computeBuildingScanAltitudes(3)).toEqual({
+      minAltitude: 1,
+      maxAltitude: 5,
+    });
+  });
+
+  it("scales with building height", () => {
+    expect(computeBuildingScanAltitudes(10)).toEqual({
+      minAltitude: 2,
+      maxAltitude: 13,
+    });
+    expect(computeBuildingScanAltitudes(30)).toEqual({
+      minAltitude: 5,
+      maxAltitude: 38,
+    });
+  });
+
+  it("caps at 100 m and stays sane on bad input", () => {
+    expect(computeBuildingScanAltitudes(150).maxAltitude).toBe(100);
+    expect(computeBuildingScanAltitudes(0)).toEqual({
+      minAltitude: 1,
+      maxAltitude: 3,
+    });
+    expect(computeBuildingScanAltitudes(NaN).maxAltitude).toBeGreaterThan(
+      computeBuildingScanAltitudes(NaN).minAltitude,
+    );
   });
 });
 
