@@ -94,6 +94,30 @@ export function pointInPolygon(
 }
 
 /**
+ * Point-in-polygon avec marge de sécurité : le point ET ses 4 voisins
+ * cardinaux à `marginM` doivent être dans l'anneau. Approximation d'une
+ * érosion du polygone (exacte en zone localement convexe, documentée).
+ */
+export function isPointInsideRingWithMargin(
+  lat: number,
+  lng: number,
+  ring: [number, number][],
+  marginM: number,
+): boolean {
+  if (!pointInPolygon([lat, lng], ring)) return false;
+  if (!(marginM > 0)) return true;
+  const dLat = marginM / 111320;
+  const dLng =
+    marginM / (111320 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+  return (
+    pointInPolygon([lat + dLat, lng], ring) &&
+    pointInPolygon([lat - dLat, lng], ring) &&
+    pointInPolygon([lat, lng + dLng], ring) &&
+    pointInPolygon([lat, lng - dLng], ring)
+  );
+}
+
+/**
  * Test if two line segments (p1→p2) and (p3→p4) intersect.
  */
 function segmentsIntersect(

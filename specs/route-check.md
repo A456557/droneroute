@@ -63,3 +63,6 @@ Check the current route before exporting it, without changing the mission.
   only and reports that the image was not analyzed.
 - Export behavior is unchanged unless you enable "Bloquer l'export en cas
   d'échec bloquant".
+- R-11 checks that a facade scan stays inside the building's cadastral
+  parcel (2 m edge margin): waypoints outside are a warning (possible
+  neighboring-parcel overflight), never blocking.

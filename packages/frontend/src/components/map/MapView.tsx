@@ -65,6 +65,7 @@ import {
   type PencilParams,
   type TemplateResult,
 } from "@/lib/templates";
+import { siteApi } from "@/lib/site";
 import { MapToolbar } from "./MapToolbar";
 import { TemplateConfigPanel } from "./TemplateConfigPanel";
 import { AirspaceOverlay } from "./AirspaceOverlay";
@@ -538,12 +539,23 @@ function appendTemplateResultWithOffset(
   target.pois.push(...result.pois);
 }
 
+/** Parcelle cadastrale du bâtiment scanné, pour contraindre le vol. */
+export type FacadeParcelInfo = {
+  polygon: [number, number][];
+  label: string | null;
+} | null;
+
 function generateFacadeMissionForAllSegments(args: {
   segments: FacadeSegmentOption[];
   heightM: number;
   density: "standard" | "dense";
+  parcel: FacadeParcelInfo;
 }): TemplateResult {
   const mission: TemplateResult = { waypoints: [], pois: [] };
+  const outsideIndexes: number[] = [];
+  let adjustedCount = 0;
+  let parcelProvided = false;
+  let parcelLabel: string | null = null;
 
   for (const segment of args.segments) {
     const params = buildBuildingScanFacadeParams(
@@ -551,14 +563,37 @@ function generateFacadeMissionForAllSegments(args: {
       args.heightM,
       args.density,
     );
+    if (args.parcel) {
+      params.parcelPolygon = args.parcel.polygon;
+      params.parcelLabel = args.parcel.label;
+    }
+    const offset = mission.waypoints.length;
     const result = generateFacade(params);
     appendTemplateResultWithOffset(
       mission,
       result,
       `${segment.label} waypoint`,
     );
+    if (result.parcelReport) {
+      parcelProvided = true;
+      parcelLabel = result.parcelReport.parcelLabel;
+      adjustedCount += result.parcelReport.adjustedCount;
+      for (const i of result.parcelReport.outsideIndexes) {
+        outsideIndexes.push(offset + i);
+      }
+    }
   }
 
+  if (parcelProvided) {
+    mission.parcelReport = {
+      parcelProvided: true,
+      parcelLabel,
+      totalCount: mission.waypoints.length,
+      insideCount: mission.waypoints.length - outsideIndexes.length,
+      adjustedCount,
+      outsideIndexes,
+    };
+  }
   return mission;
 }
 
@@ -2752,6 +2787,48 @@ export function MapView() {
     );
   }, [selectedBdTopoBuilding, selectedRnbBuilding]);
 
+  // Parcelle cadastrale du bâtiment sélectionné (APICarto via /site/summary,
+  // sans clé) : le plan de vol façade est contraint à ses limites.
+  const [facadeParcel, setFacadeParcel] = useState<FacadeParcelInfo>(null);
+  useEffect(() => {
+    const centroid = selectedRnbBuilding?.building.centroid;
+    setFacadeParcel(null);
+    if (
+      !centroid ||
+      !Number.isFinite(centroid.lat) ||
+      !Number.isFinite(centroid.lng)
+    ) {
+      return;
+    }
+    let cancelled = false;
+    siteApi
+      .summary([{ lat: centroid.lat, lon: centroid.lng }])
+      .then((summary) => {
+        if (cancelled) return;
+        const parcelle = summary.parcelle;
+        const polygon = Array.isArray(parcelle?.polygon)
+          ? parcelle.polygon.filter(
+              (pt): pt is [number, number] =>
+                Array.isArray(pt) &&
+                Number.isFinite(pt[0]) &&
+                Number.isFinite(pt[1]),
+            )
+          : [];
+        if (polygon.length < 3) return;
+        const label =
+          parcelle?.commune || parcelle?.section || parcelle?.numero
+            ? `${parcelle?.commune ?? ""} section ${parcelle?.section ?? "?"} n°${parcelle?.numero ?? "?"}`.trim()
+            : null;
+        setFacadeParcel({ polygon, label });
+      })
+      .catch(() => {
+        // Sans parcelle, le vol façade reste possible (sans contrainte).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRnbBuilding]);
+
   const buildingScanVariants = useMemo<BuildingScanVariantOption[]>(() => {
     if (selectedBuildingScanMode === "reconstruction-3d") {
       return [
@@ -2828,6 +2905,7 @@ export function MapView() {
         heightM: selectedBuildingHeightM,
         density:
           selectedBuildingScanVariant?.id === "dense" ? "dense" : "standard",
+        parcel: facadeParcel,
       });
 
       if (mission.waypoints.length === 0) {
@@ -2839,6 +2917,7 @@ export function MapView() {
         label: "Aperçu scan des façades",
       };
     }, [
+      facadeParcel,
       selectedBuildingDetected,
       selectedBuildingFacadeSegments,
       selectedBuildingHeightM,
@@ -3178,6 +3257,8 @@ export function MapView() {
       gridSpacingM: gridParams?.spacingM ?? null,
       gridAltitudeM: gridParams?.altitude ?? null,
       pencilPathLengthM: templateMode === "pencil" ? pathLength(rawPath) : null,
+      parcelPolygon: facadeParcel?.polygon ?? null,
+      parcelLabel: facadeParcel?.label ?? null,
     };
     setFacadeContextProvider(() => context);
     return () => {
@@ -3191,6 +3272,7 @@ export function MapView() {
     selectedFacadeSegmentId,
     facadeSegmentOptions,
     facadeParams,
+    facadeParcel,
     orbitParams,
     gridParams,
     rawPath,
@@ -3585,6 +3667,7 @@ export function MapView() {
       heightM: selectedBuildingHeightM,
       density:
         selectedBuildingScanVariant?.id === "dense" ? "dense" : "standard",
+      parcel: facadeParcel,
     });
 
     if (mission.waypoints.length === 0) {
@@ -3593,11 +3676,23 @@ export function MapView() {
     }
 
     appendWaypoints(mission.waypoints, mission.pois);
-    toast.success(
-      `${mission.waypoints.length} waypoints ajoutés pour ${selectedBuildingFacadeSegments.length} façades.`,
-    );
+    const parcelReport = mission.parcelReport;
+    if (parcelReport && parcelReport.outsideIndexes.length > 0) {
+      toast.warning(
+        `${mission.waypoints.length} waypoints ajoutés, mais ${parcelReport.outsideIndexes.length} restent hors de la parcelle ${parcelReport.parcelLabel ?? "cadastrale"} malgré le resserrement : survol voisin possible, à vérifier.`,
+      );
+    } else if (parcelReport && parcelReport.adjustedCount > 0) {
+      toast.success(
+        `${mission.waypoints.length} waypoints ajoutés pour ${selectedBuildingFacadeSegments.length} façades, dont ${parcelReport.adjustedCount} resserrés dans la parcelle.`,
+      );
+    } else {
+      toast.success(
+        `${mission.waypoints.length} waypoints ajoutés pour ${selectedBuildingFacadeSegments.length} façades.`,
+      );
+    }
   }, [
     appendWaypoints,
+    facadeParcel,
     selectedBuildingDetected,
     selectedBuildingFacadeSegments,
     selectedBuildingHeightM,

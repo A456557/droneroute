@@ -41,6 +41,9 @@ export type MeteoSnapshot = {
   time: string | null;
 } | null;
 
+/** Nombre max de sommets du polygone parcelle exposé (poids réseau). */
+export const PARCEL_POLYGON_MAX_POINTS = 256;
+
 export type ParcelleSnapshot = {
   commune: string | null;
   codeInsee: string | null;
@@ -48,6 +51,8 @@ export type ParcelleSnapshot = {
   numero: string | null;
   contenanceM2: number | null;
   idu: string | null;
+  /** Anneau extérieur [lat, lng], sous-échantillonné si besoin. */
+  polygon: Array<[number, number]> | null;
 } | null;
 
 export type UrbanismeSnapshot = {
@@ -158,6 +163,32 @@ const str = (v: unknown): string | null =>
 const num = (v: unknown): number | null =>
   typeof v === "number" && Number.isFinite(v) ? v : null;
 
+/**
+ * Anneau extérieur du polygone, validé et sous-échantillonné pour
+ * limiter le poids (utilisé pour contraindre les vols façade).
+ */
+function parseParcelPolygon(
+  fc: FeatureCollection | null,
+): Array<[number, number]> | null {
+  const geometry = fc?.features?.[0]?.geometry;
+  if (!geometry) return null;
+  const rings = toLatLngRings(geometry);
+  const outer = rings[0]?.filter(
+    (pt): pt is [number, number] =>
+      Array.isArray(pt) &&
+      pt.length >= 2 &&
+      Number.isFinite(pt[0]) &&
+      Number.isFinite(pt[1]),
+  );
+  if (!outer || outer.length < 3) return null;
+  if (outer.length <= PARCEL_POLYGON_MAX_POINTS) return outer;
+  const step = outer.length / PARCEL_POLYGON_MAX_POINTS;
+  return Array.from(
+    { length: PARCEL_POLYGON_MAX_POINTS },
+    (_, i) => outer[Math.floor(i * step)] as [number, number],
+  );
+}
+
 function parseParcelle(fc: FeatureCollection | null): ParcelleSnapshot {
   const p = fc?.features?.[0]?.properties;
   if (!p) return null;
@@ -170,6 +201,7 @@ function parseParcelle(fc: FeatureCollection | null): ParcelleSnapshot {
     numero: str(p.numero),
     contenanceM2: contenance,
     idu: str(p.idu),
+    polygon: parseParcelPolygon(fc),
   };
 }
 

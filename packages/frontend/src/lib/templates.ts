@@ -4,6 +4,7 @@ import type {
   WaypointAction,
 } from "@droneroute/shared";
 import { DEFAULT_WAYPOINT } from "@droneroute/shared";
+import { isPointInsideRingWithMargin } from "./geo";
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -107,7 +108,33 @@ export interface FacadeParams {
   numRows: number;
   numColumns: number;
   addPhotos: boolean;
+  /** Anneau [lat, lng] de la parcelle cadastrale du bâtiment, si connu. */
+  parcelPolygon?: [number, number][] | null;
+  /** Libellé parcelle pour les rapports (ex. "Paris section AB n°12"). */
+  parcelLabel?: string | null;
+  /** Marge de sécurité au bord de parcelle (m, défaut 2). */
+  parcelMarginM?: number;
+  /** Recul mini au mur lors du resserrement (m, défaut 5). */
+  parcelMinDistanceM?: number;
 }
+
+/** Bilan du maintien des waypoints façade dans la parcelle cadastrale. */
+export interface FacadeParcelReport {
+  parcelProvided: boolean;
+  parcelLabel: string | null;
+  totalCount: number;
+  insideCount: number;
+  adjustedCount: number;
+  /** Index (locaux au résultat) restant hors parcelle malgré resserrement. */
+  outsideIndexes: number[];
+}
+
+/** Marge de sécurité par défaut au bord de parcelle (m). */
+export const FACADE_PARCEL_MARGIN_M = 2;
+/** Recul mini au mur lors du resserrement dans la parcelle (m). */
+export const FACADE_PARCEL_MIN_DISTANCE_M = 5;
+/** Pas de resserrement du recul (m). */
+const FACADE_PARCEL_CLAMP_STEP_M = 0.5;
 
 export interface PencilParams {
   path: [number, number][]; // raw drawn points [lat, lng]
@@ -128,6 +155,8 @@ export type TemplateParams =
 export interface TemplateResult {
   waypoints: Omit<Waypoint, "index" | "name">[];
   pois: Omit<PointOfInterest, "id">[];
+  /** Bilan parcelle (façade uniquement, null sinon). */
+  parcelReport?: FacadeParcelReport | null;
 }
 
 // ── Default Params ───────────────────────────────────────
@@ -415,6 +444,24 @@ export function generateGrid(params: GridParams): TemplateResult {
   return { waypoints, pois: [] };
 }
 
+/**
+ * Anneau parcelle valide (≥ 3 sommets finis), sinon null.
+ * Sans parcelle connue, la génération reste inchangée (compatibilité).
+ */
+function normalizeParcelRing(
+  polygon: [number, number][] | null | undefined,
+): [number, number][] | null {
+  if (!Array.isArray(polygon)) return null;
+  const ring = polygon.filter(
+    (pt): pt is [number, number] =>
+      Array.isArray(pt) &&
+      pt.length >= 2 &&
+      Number.isFinite(pt[0]) &&
+      Number.isFinite(pt[1]),
+  );
+  return ring.length >= 3 ? ring : null;
+}
+
 export function generateFacade(params: FacadeParams): TemplateResult {
   const {
     point1,
@@ -425,6 +472,10 @@ export function generateFacade(params: FacadeParams): TemplateResult {
     numRows,
     numColumns,
     addPhotos,
+    parcelPolygon,
+    parcelLabel,
+    parcelMarginM,
+    parcelMinDistanceM,
   } = params;
   const [lat1, lng1] = point1;
   const [lat2, lng2] = point2;
@@ -440,6 +491,18 @@ export function generateFacade(params: FacadeParams): TemplateResult {
   const columns = Math.max(1, Math.round(numColumns));
   const altitudes = computeFacadeAltitudes(minAltitude, maxAltitude, rows);
 
+  // Contrainte parcelle cadastrale : chaque waypoint hors parcelle (avec
+  // marge) est resserré vers le mur jusqu'à rentrer, sans descendre sous
+  // le recul mini (sécurité). Au maximum dans les limites, jamais au-delà.
+  const parcelRing = normalizeParcelRing(parcelPolygon);
+  const marginM = parcelMarginM ?? FACADE_PARCEL_MARGIN_M;
+  const minDistanceM = Math.max(
+    0.5,
+    parcelMinDistanceM ?? FACADE_PARCEL_MIN_DISTANCE_M,
+  );
+  const outsideIndexes: number[] = [];
+  let adjustedCount = 0;
+
   // Generate the scan grid along the wall
   for (let row = 0; row < rows; row++) {
     const alt = altitudes[row];
@@ -453,13 +516,61 @@ export function generateFacade(params: FacadeParams): TemplateResult {
       const wallLat = lat1 + colFraction * (lat2 - lat1);
       const wallLng = lng1 + colFraction * (lng2 - lng1);
 
-      // Offset perpendicular to wall
-      const [wpLat, wpLng] = destinationPoint(
-        wallLat,
-        wallLng,
-        distanceM,
-        offsetBearing,
-      );
+      // Offset perpendicular to wall, resserré si hors parcelle
+      let effectiveDistanceM = Math.max(0, distanceM);
+      let wpLat: number;
+      let wpLng: number;
+      if (parcelRing) {
+        [wpLat, wpLng] = destinationPoint(
+          wallLat,
+          wallLng,
+          effectiveDistanceM,
+          offsetBearing,
+        );
+        if (!isPointInsideRingWithMargin(wpLat, wpLng, parcelRing, marginM)) {
+          let clamped = effectiveDistanceM;
+          while (clamped - FACADE_PARCEL_CLAMP_STEP_M >= minDistanceM - 1e-9) {
+            clamped -= FACADE_PARCEL_CLAMP_STEP_M;
+            const [candLat, candLng] = destinationPoint(
+              wallLat,
+              wallLng,
+              clamped,
+              offsetBearing,
+            );
+            if (
+              isPointInsideRingWithMargin(candLat, candLng, parcelRing, marginM)
+            ) {
+              wpLat = candLat;
+              wpLng = candLng;
+              break;
+            }
+          }
+          if (clamped < effectiveDistanceM - 1e-9) {
+            // Dernier essai tenu (plancher mini), même si encore dehors.
+            [wpLat, wpLng] = destinationPoint(
+              wallLat,
+              wallLng,
+              Math.max(minDistanceM, Math.min(clamped, effectiveDistanceM)),
+              offsetBearing,
+            );
+            effectiveDistanceM = Math.max(
+              minDistanceM,
+              Math.min(clamped, effectiveDistanceM),
+            );
+            adjustedCount += 1;
+          }
+          if (!isPointInsideRingWithMargin(wpLat, wpLng, parcelRing, marginM)) {
+            outsideIndexes.push(waypoints.length);
+          }
+        }
+      } else {
+        [wpLat, wpLng] = destinationPoint(
+          wallLat,
+          wallLng,
+          effectiveDistanceM,
+          offsetBearing,
+        );
+      }
 
       // Heading: face the wall (opposite of offset direction)
       const headingToWall = (offsetBearing + 180) % 360;
@@ -467,8 +578,12 @@ export function generateFacade(params: FacadeParams): TemplateResult {
         headingToWall > 180 ? headingToWall - 360 : headingToWall;
 
       // Gimbal: calculate pitch toward wall point at ground level
+      // (recalculé sur le recul effectif après resserrement parcelle)
       const heightDiff = alt; // drone altitude above wall base
-      const pitchRad = Math.atan2(heightDiff, distanceM);
+      const pitchRad = Math.atan2(
+        heightDiff,
+        Math.max(0.5, effectiveDistanceM),
+      );
       const gimbalPitch = Math.round(-pitchRad * (180 / Math.PI));
 
       waypoints.push({
@@ -497,7 +612,18 @@ export function generateFacade(params: FacadeParams): TemplateResult {
     }
   }
 
-  return { waypoints, pois: [] };
+  const parcelReport: FacadeParcelReport | null = parcelRing
+    ? {
+        parcelProvided: true,
+        parcelLabel: parcelLabel ?? null,
+        totalCount: waypoints.length,
+        insideCount: waypoints.length - outsideIndexes.length,
+        adjustedCount,
+        outsideIndexes,
+      }
+    : null;
+
+  return { waypoints, pois: [], parcelReport };
 }
 
 // ── Pencil (freehand path) ──────────────────────────────

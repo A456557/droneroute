@@ -35,6 +35,20 @@ At each waypoint, you can tell the drone to:
 - **Zoom** to a specific focal length.
 - **Focus** on a specific point or set to infinite focus.
 
+## Facade scan
+
+- A facade scan flies a zigzag grid parallel to the selected wall segment,
+  at the configured standoff distance, facing the wall.
+- When a building is selected, its cadastral parcel is fetched (APICarto,
+  no key) and the flight plan is kept inside the parcel limits: any
+  waypoint outside the parcel (with a 2 m edge margin) is pulled back
+  toward the wall, never below a 5 m minimum standoff.
+- If a waypoint cannot fit inside the parcel even at minimum standoff
+  (e.g. wall on the parcel boundary), it is kept at minimum standoff and
+  flagged: the apply toast warns, and the route check reports it (R-11)
+  as a possible neighboring-parcel overflight.
+- Without a known parcel, generation works as before (no constraint).
+
 ## Good to know
 
 - The flight path is drawn on the map as an animated dashed line. The animation speed reflects the drone's configured speed at each segment.

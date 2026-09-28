@@ -195,6 +195,71 @@ describe("obstacles connus", () => {
   });
 });
 
+describe("parcelle cadastrale du scan façade (R-11)", () => {
+  const facadeBase = {
+    active: true,
+    templateMode: "facade",
+    buildingRnbId: "RNB123",
+    buildingHeightM: 20,
+    heightSource: "BD TOPO",
+    segmentId: "segment-0",
+    segmentLengthM: 20,
+    distanceM: 15,
+    numRows: 4,
+    numColumns: 8,
+  };
+  // Anneau autour des waypoints de base (43.45, 1.4).
+  const ring: [number, number][] = [
+    [43.449, 1.399],
+    [43.449, 1.403],
+    [43.453, 1.403],
+    [43.453, 1.399],
+  ];
+
+  it("confirme quand tous les waypoints restent dans la parcelle", () => {
+    const { findings } = runRouteChecks(
+      baseInput({
+        templateMode: "facade",
+        facade: {
+          ...facadeBase,
+          parcelPolygon: ring,
+          parcelLabel: "Test section A n°1",
+        },
+      }),
+    );
+    const finding = findings.find((f) => f.checkId === "R-11");
+    expect(finding?.severity).toBe("info");
+  });
+
+  it("avertit avec les numéros quand un waypoint sort de la parcelle", () => {
+    const { findings } = runRouteChecks(
+      baseInput({
+        waypoints: [
+          makeWaypoint({ index: 0, latitude: 43.45, longitude: 1.4 }),
+          makeWaypoint({ index: 1, latitude: 43.46, longitude: 1.41 }),
+        ],
+        templateMode: "facade",
+        facade: {
+          ...facadeBase,
+          parcelPolygon: ring,
+          parcelLabel: "Test section A n°1",
+        },
+      }),
+    );
+    const finding = findings.find((f) => f.checkId === "R-11");
+    expect(finding?.severity).toBe("warning");
+    expect(finding?.label).toContain("1 waypoint hors parcelle");
+    expect(finding?.description).toContain("n°2");
+  });
+
+  it("ne produit rien sans polygone de parcelle", () => {
+    const { findings } = runRouteChecks(
+      baseInput({ templateMode: "facade", facade: { ...facadeBase } }),
+    );
+    expect(findings.some((f) => f.checkId === "R-11")).toBe(false);
+  });
+});
+
 describe("hauteur de bâtiment absente", () => {
   it("avertit sans conclure favorablement", () => {
     const { findings } = runRouteChecks(

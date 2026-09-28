@@ -9,12 +9,16 @@ import {
   extractPolygons,
   getObstacleWarnings,
   haversineDistance,
+  isPointInsideRingWithMargin,
   obstacleMaxHeightM,
   obstacleMinHeightM,
   pointInPolygon,
   segmentIntersectsPolygon,
 } from "@/lib/geo";
-import { MIN_PENCIL_PATH_LENGTH_M } from "@/lib/templates";
+import {
+  FACADE_PARCEL_MARGIN_M,
+  MIN_PENCIL_PATH_LENGTH_M,
+} from "@/lib/templates";
 import type { AirspaceZone } from "@/store/airspaceStore";
 
 // ── Contrôle du parcours ─────────────────────────────────────────
@@ -128,6 +132,9 @@ export interface FacadeCheckContext {
   gridSpacingM?: number | null;
   gridAltitudeM?: number | null;
   pencilPathLengthM?: number | null;
+  /** Parcelle cadastrale du bâtiment scanné (contrainte vol façade). */
+  parcelPolygon?: [number, number][] | null;
+  parcelLabel?: string | null;
 }
 
 export interface TerrainCheckInput {
@@ -858,6 +865,54 @@ export function runRouteChecks(input: RouteCheckInput): {
       dataSource: { source: "Mission en cours", updatedAt: null },
       missing: [],
     });
+  }
+
+  // R-11 — maintien du scan de façade dans la parcelle cadastrale du
+  // bâtiment (marge de sécurité incluse ; jamais bloquant : warning).
+  const parcelRing = Array.isArray(facade?.parcelPolygon)
+    ? facade.parcelPolygon.filter(
+        (pt): pt is [number, number] =>
+          Array.isArray(pt) && Number.isFinite(pt[0]) && Number.isFinite(pt[1]),
+      )
+    : [];
+  if (facade?.active && parcelRing.length >= 3 && waypoints.length > 0) {
+    const outside = waypoints.filter(
+      (wp) =>
+        !isPointInsideRingWithMargin(
+          wp.latitude,
+          wp.longitude,
+          parcelRing,
+          FACADE_PARCEL_MARGIN_M,
+        ),
+    );
+    const parcelName = facade.parcelLabel ?? "la parcelle cadastrale";
+    if (outside.length === 0) {
+      pushFinding({
+        checkId: "R-11",
+        label: "Vol façade dans la parcelle",
+        severity: "info",
+        rule: "Maintien dans la parcelle cadastrale",
+        target: { kind: "mission" },
+        description: `Les ${waypoints.length} waypoints restent dans ${parcelName} (marge ${FACADE_PARCEL_MARGIN_M} m).`,
+        dataSource: { source: "PCI (APICarto cadastre)", updatedAt: null },
+        missing: [],
+      });
+    } else {
+      const listed = outside
+        .slice(0, 8)
+        .map((wp) => `n°${wp.index + 1}`)
+        .join(", ");
+      pushFinding({
+        checkId: "R-11",
+        label: `${outside.length} waypoint${outside.length > 1 ? "s" : ""} hors parcelle`,
+        severity: "warning",
+        rule: "Maintien dans la parcelle cadastrale",
+        target: { kind: "mission" },
+        description: `${outside.length} waypoint${outside.length > 1 ? "s" : ""} (${listed}${outside.length > 8 ? ", …" : ""}) sortent de ${parcelName} malgré le resserrement au recul mini : survol de parcelle voisine possible, à vérifier avant export.`,
+        dataSource: { source: "PCI (APICarto cadastre)", updatedAt: null },
+        missing: [],
+      });
+    }
   }
 
   return {

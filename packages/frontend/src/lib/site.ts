@@ -18,6 +18,8 @@ export type SiteSummary = {
     numero: string | null;
     contenanceM2: number | null;
     idu: string | null;
+    /** Anneau extérieur [lat, lng] (contrainte vols façade). */
+    polygon: Array<[number, number]> | null;
   } | null;
   urbanisme: {
     documentType: string | null;
