@@ -10,3 +10,4 @@ tsconfig.tsbuildinfo
 *.tsbuildinfo
 *.kmz
 audit-*.png
+demo-visuelle*/
