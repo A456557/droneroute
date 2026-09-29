@@ -67,6 +67,11 @@ import {
   type TemplateResult,
 } from "@/lib/templates";
 import { formatParcelLabel, normalizeParcelPolygon, siteApi } from "@/lib/site";
+import {
+  streetlevelApi,
+  type StreetPhotosState,
+  type StreetPhoto,
+} from "@/lib/streetlevel";
 import { MapToolbar } from "./MapToolbar";
 import { TemplateConfigPanel } from "./TemplateConfigPanel";
 import { AirspaceOverlay } from "./AirspaceOverlay";
@@ -670,6 +675,7 @@ function buildRnbInfoWindowContent(args: {
   threeDMarkers: Buildings3DMarker[];
   approximateBuildingShell: ReconstructedBuildingShell | null;
   loading: boolean;
+  streetPhotos: StreetPhotosState;
 }): React.ReactNode {
   const {
     building,
@@ -677,6 +683,7 @@ function buildRnbInfoWindowContent(args: {
     threeDMarkers,
     approximateBuildingShell,
     loading,
+    streetPhotos,
   } = args;
   // Toutes les mesures sont conservées : hauteur, périmètre, longueur max,
   // largeur max, surface et longueurs de chaque segment de façade.
@@ -877,6 +884,97 @@ function buildRnbInfoWindowContent(args: {
           ))}
         </>
       ) : null}
+
+      <RnbInfoSection>Photo rue (Panoramax)</RnbInfoSection>
+      {streetPhotos.status === "loading" ? (
+        <div className="animate-pulse space-y-1.5" aria-hidden="true">
+          <div className="h-20 rounded bg-muted" />
+          <div className="h-3 w-4/6 rounded bg-muted" />
+        </div>
+      ) : streetPhotos.status === "ready" && streetPhotos.photos.length > 0 ? (
+        <StreetPhotoGallery photos={streetPhotos.photos} />
+      ) : streetPhotos.status === "ready" ? (
+        <div className="rounded-md border border-border/70 bg-muted/50 px-2.5 py-2 text-[11px] text-muted-foreground">
+          Aucune photo disponible à proximité (150 m), ni sur Panoramax IGN ni
+          sur OpenStreetMap France. La zone n&apos;a peut-être pas encore été
+          photographiée —{" "}
+          <a
+            href="https://panoramax.fr/"
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
+            contribuer
+          </a>
+          .
+        </div>
+      ) : streetPhotos.status === "error" ? (
+        <div className="rounded-md border border-border/70 bg-muted/50 px-2.5 py-2 text-[11px] text-muted-foreground">
+          Photos rue indisponibles pour le moment (réseau ou service Panoramax).
+          Réessaie en resélectionnant le bâtiment.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StreetPhotoGallery({ photos }: { photos: StreetPhoto[] }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = photos.find((photo) => photo.id === selectedId) ?? photos[0];
+  return (
+    <div>
+      <a
+        href={selected.viewerUrl}
+        target="_blank"
+        rel="noreferrer"
+        title="Ouvrir dans le visionneur Panoramax"
+      >
+        <img
+          src={selected.thumbUrl}
+          alt={`Vue rue à ${selected.distanceM} m du bâtiment`}
+          loading="lazy"
+          className="w-full rounded border border-border object-cover"
+        />
+      </a>
+      <div className="mt-1 text-[11px] text-muted-foreground">
+        {selected.distanceM} m
+        {selected.capturedAt
+          ? ` • ${new Date(selected.capturedAt).toLocaleDateString("fr-FR")}`
+          : ""}
+        {" • "}
+        <a
+          href={selected.viewerUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          Voir en grand
+        </a>
+      </div>
+      {photos.length > 1 ? (
+        <div className="mt-1.5 grid grid-cols-6 gap-1">
+          {photos.map((photo) => (
+            <button
+              key={photo.id}
+              type="button"
+              onClick={() => setSelectedId(photo.id)}
+              title={`${photo.distanceM} m`}
+              className={`overflow-hidden rounded border ${photo.id === selected.id ? "border-primary" : "border-border opacity-70 hover:opacity-100"}`}
+            >
+              <img
+                src={photo.thumbUrl}
+                alt=""
+                loading="lazy"
+                className="h-8 w-full object-cover"
+              />
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="mt-1 text-[10px] text-muted-foreground">
+        © {selected.source} · Licence Ouverte — aide visuelle, pas une donnée
+        mission
+      </div>
     </div>
   );
 }
@@ -2821,6 +2919,41 @@ export function MapView() {
       cancelled = true;
     };
   }, [selectedRnbBuilding]);
+
+  // Photos de rue Panoramax (IGN, open data, sans clé) proches du bâtiment
+  // sélectionné : simple aide visuelle, jamais une donnée mission.
+  const [streetPhotos, setStreetPhotos] = useState<StreetPhotosState>({
+    status: "idle",
+  });
+  useEffect(() => {
+    const centroid =
+      selectedBdTopoBuilding?.centroid ??
+      selectedRnbBuilding?.building.centroid ??
+      selectedRnbBuilding?.building.point;
+    setStreetPhotos({ status: "idle" });
+    if (
+      !centroid ||
+      !Number.isFinite(centroid.lat) ||
+      !Number.isFinite(centroid.lng)
+    ) {
+      return;
+    }
+    let cancelled = false;
+    setStreetPhotos({ status: "loading" });
+    streetlevelApi
+      .nearby(centroid.lat, centroid.lng, 150, 6)
+      .then((response) => {
+        if (cancelled) return;
+        setStreetPhotos({ status: "ready", photos: response.photos });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setStreetPhotos({ status: "error" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRnbBuilding, selectedBdTopoBuilding]);
 
   const buildingScanVariants = useMemo<BuildingScanVariantOption[]>(() => {
     if (selectedBuildingScanMode === "reconstruction-3d") {
@@ -5143,6 +5276,7 @@ export function MapView() {
               threeDMarkers: buildings3DMarkers,
               approximateBuildingShell: reconstructionShell,
               loading: selectedRnbBuildingLoading,
+              streetPhotos,
             })}
           </div>
         </DraggablePanel>
